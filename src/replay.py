@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from src.executor import run_clang, run_lli
 
@@ -51,7 +51,7 @@ def _iter_failure_names(results_dir: Path) -> Iterable[str]:
             yield name
 
 
-def _resolve_ir_path(valid_dir: Path, name: str) -> Path | None:
+def _resolve_ir_path(valid_dir: Path, name: str) -> Optional[Path]:
     candidate = valid_dir / f"{name}.ll"
     if candidate.exists():
         return candidate
