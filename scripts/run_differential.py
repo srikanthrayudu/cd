@@ -22,6 +22,10 @@ def main() -> None:
     diffs_path = paths.results_dir / "diffs.jsonl"
     skipped_path = paths.results_dir / "skipped_exec.jsonl"
 
+    for p in (executions_path, diffs_path, skipped_path):
+        if p.exists():
+            p.unlink()
+
     for file_path in sorted(paths.valid_dir.glob("*.ll")):
         res_lli = run_lli(file_path)
         res_o0 = run_clang(file_path, "O0")

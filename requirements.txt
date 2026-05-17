@@ -1,3 +1,5 @@
-# No external dependencies required for the prototype
+# Python dependencies for the prototype (LLVM tools are system packages, see docs).
 openai>=1.0.0
 matplotlib>=3.7.0
+streamlit>=1.30.0
+pandas>=2.0.0

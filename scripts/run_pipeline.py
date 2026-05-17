@@ -13,7 +13,7 @@ from src.pipeline import run_pipeline
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the full IR pipeline.")
-    parser.add_argument("--count", type=int, default=5)
+    parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--per-file", type=int, default=2)
     parser.add_argument("--backend", type=str, default="template")
     parser.add_argument("--model", type=str, default="gpt-4o-mini")

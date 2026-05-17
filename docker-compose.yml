@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  cd-app:
+    build: .
+    container_name: cd_app
+    restart: unless-stopped
+    ports:
+      - "8501:8501" # streamlit
+    volumes:
+      - ./:/workspace
+    environment:
+      # Forward OpenAI key if present in host env
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    tty: true
+

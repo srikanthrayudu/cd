@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass
 
 from src.executor import ExecutionResult
@@ -13,6 +14,28 @@ class DiffResult:
     diff: str
     o0_exit: int | None = None
     o3_exit: int | None = None
+
+
+@dataclass
+class CodeDiffResult:
+    name: str
+    o0_ir: str
+    o3_ir: str
+    unified_diff: str
+    identical: bool
+
+
+def compare_optimized_ir(name: str, o0_ir: str, o3_ir: str) -> CodeDiffResult:
+    diff_lines = list(
+        difflib.unified_diff(
+            o0_ir.splitlines(),
+            o3_ir.splitlines(),
+            fromfile=f"{name}.O0.ll",
+            tofile=f"{name}.O3.ll",
+            lineterm="",
+        )
+    )
+    return CodeDiffResult(name=name, o0_ir=o0_ir, o3_ir=o3_ir, unified_diff="\n".join(diff_lines) + ("\n" if diff_lines else ""), identical=(o0_ir == o3_ir))
 
 
 def compare_results(name: str, res_o0: ExecutionResult, res_o3: ExecutionResult) -> DiffResult:

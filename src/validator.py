@@ -54,14 +54,14 @@ def validate_ir(file_path: Path) -> ValidationResult:
                 text=True,
             )
             subprocess.run(
-                ["opt", "-verify", str(tmp_bc), "-o", str(tmp_bc)],
+                ["opt", "-passes=verify", str(tmp_bc), "-o", str(tmp_bc)],
                 check=True,
                 capture_output=True,
                 text=True,
             )
             if _should_fix_ssa():
                 subprocess.run(
-                    ["opt", "-mem2reg", str(tmp_bc), "-o", str(tmp_bc)],
+                    ["opt", "-passes=mem2reg", str(tmp_bc), "-o", str(tmp_bc)],
                     check=True,
                     capture_output=True,
                     text=True,

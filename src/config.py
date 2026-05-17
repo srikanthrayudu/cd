@@ -15,6 +15,8 @@ class ProjectPaths:
     logs_dir: Path
     results_dir: Path
     evaluation_dir: Path
+    optimized_dir: Path
+    diffs_dir: Path
 
     @staticmethod
     def from_root(root: Path) -> "ProjectPaths":
@@ -28,6 +30,8 @@ class ProjectPaths:
             logs_dir=root / "logs",
             results_dir=root / "results",
             evaluation_dir=root / "evaluation",
+            optimized_dir=root / "results" / "optimized_ir",
+            diffs_dir=root / "results" / "code_diffs",
         )
 
     def ensure_dirs(self) -> None:
@@ -40,6 +44,8 @@ class ProjectPaths:
             self.logs_dir,
             self.results_dir,
             self.evaluation_dir,
+            self.optimized_dir,
+            self.diffs_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 

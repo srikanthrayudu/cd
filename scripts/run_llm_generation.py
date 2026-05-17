@@ -14,7 +14,7 @@ from src.llm_generator import GenerationConfig, write_generated_ir
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate LLVM IR (template-based).")
-    parser.add_argument("--count", type=int, default=5)
+    parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--backend", type=str, default="template")
     parser.add_argument("--model", type=str, default="gpt-4o-mini")
     parser.add_argument("--mode", type=str, default="generate", choices=["generate", "mutate"])
