@@ -180,6 +180,12 @@ def build_dashboard_snapshot() -> dict[str, Any]:
     optimization_artifacts = _count_files(DIFF_DIR, "*.diff")
     optimized_pairs = _count_optimized_pairs()
 
+    run_metadata: dict[str, str] = {}
+    for key in ("generated_at", "backend", "model", "mode", "scope", "seed_dir", "test_file", "gen_count", "mut_per_file"):
+        value = manifest.get(key)
+        if value is not None:
+            run_metadata[key] = str(value)
+
     execution_cases = len({row.get("name") for row in execution_rows if row.get("name")})
 
     total_o0_size = sum(row.get("binary_size") or 0 for row in execution_rows if row.get("mode") == "O0")
@@ -214,6 +220,7 @@ def build_dashboard_snapshot() -> dict[str, Any]:
         "paired_binary_cases": paired_binary_cases,
         "binary_savings": binary_savings,
         "binary_reduction_pct": binary_reduction_pct,
+        "run_metadata": run_metadata,
         "metrics_raw": metrics,
     }
 
@@ -941,6 +948,24 @@ def render_logs_page(metrics: dict[str, Any]) -> None:
         unsafe_allow_html=True,
     )
     render_summary_panel(metrics)
+
+    run_metadata = metrics.get("run_metadata") if isinstance(metrics.get("run_metadata"), dict) else {}
+    if run_metadata:
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Current run metadata</div><div class="panel-subtitle">Reproducibility details captured in `results/run_manifest.json`.</div></div>',
+            unsafe_allow_html=True,
+        )
+        meta_cols = st.columns(2)
+        ordered_keys = ["generated_at", "backend", "model", "mode", "scope", "gen_count", "mut_per_file", "seed_dir", "test_file"]
+        items = [(key, run_metadata[key]) for key in ordered_keys if key in run_metadata]
+        left_items = items[: (len(items) + 1) // 2]
+        right_items = items[(len(items) + 1) // 2 :]
+        with meta_cols[0]:
+            for key, value in left_items:
+                st.write(f"• **{key}**: `{value}`")
+        with meta_cols[1]:
+            for key, value in right_items:
+                st.write(f"• **{key}**: `{value}`")
 
     triage_path = RESULTS_DIR / "triage.json"
     executions_path = RESULTS_DIR / "executions.jsonl"

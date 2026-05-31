@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -43,6 +44,36 @@ def ensure_seed_corpus(paths: ProjectPaths) -> None:
     lines.append("  ret i32 %x1499")
     lines.append("}\n")
     sample_file.write_text("\n".join(lines))
+
+
+def _write_run_manifest(
+    manifest_path: Path,
+    *,
+    root: Path,
+    backend: str,
+    model: str,
+    mode: str,
+    gen_count: int,
+    mut_per_file: int,
+    seed_dir: Optional[Path],
+    test_file: Optional[Path],
+    counts: dict[str, int],
+) -> None:
+    manifest: dict[str, object] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "root": str(root.resolve()),
+        "backend": backend,
+        "model": model,
+        "mode": mode,
+        "gen_count": gen_count,
+        "mut_per_file": mut_per_file,
+        "scope": "single_file" if test_file is not None else "pipeline",
+        "seed_dir": str(seed_dir.resolve()) if seed_dir else None,
+        "test_file": str(test_file.resolve()) if test_file else None,
+        **counts,
+        "counts": counts,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
 
 def run_pipeline(
@@ -111,7 +142,18 @@ def run_pipeline(
         mutated = []
         counts = {"generated": 0, "mutated": 0, "valid": 1, "invalid": 0}
 
-    manifest_path.write_text(json.dumps(counts, indent=2) + "\n")
+    _write_run_manifest(
+        manifest_path,
+        root=root,
+        backend=backend,
+        model=model,
+        mode=mode,
+        gen_count=gen_count,
+        mut_per_file=mut_per_file,
+        seed_dir=seed_dir,
+        test_file=test_file,
+        counts=counts,
+    )
 
     executions_path = paths.results_dir / "executions.jsonl"
     diffs_path = paths.results_dir / "diffs.jsonl"

@@ -19,8 +19,9 @@ python3 -u main.py
 - Reports paired binary savings and reduction percentages for each comparable program
 - Writes logs to `logs/` and JSONL results to `results/`
 - Generates `evaluation/metrics.json`, `evaluation/metrics.csv`, and `evaluation/metrics.png`
-- Generates a polished `results/summary.md` with executive-ready comparison tables
+- Generates a polished `results/summary.md` with run metadata, metrics snapshots, and executive-ready comparison tables
 - Generates `results/triage.json`
+- Records each run in `results/run_manifest.json` for reproducibility
 - Generates `results/replay.json` (on-demand)
 
 ## Optional: run individual steps
