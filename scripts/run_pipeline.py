@@ -1,34 +1,50 @@
+"""
+scripts/run_pipeline.py — Thin CLI wrapper around the full pipeline.
+
+Equivalent to running ``python3 main.py`` from the project root, but
+callable as a standalone script from the scripts/ directory.
+"""
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+# Make the project root importable when this script is run directly.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
+from src.config import cfg
 from src.pipeline import run_pipeline
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the full IR pipeline.")
-    parser.add_argument("--count", type=int, default=10)
-    parser.add_argument("--per-file", type=int, default=2)
-    parser.add_argument("--backend", type=str, default="template")
-    parser.add_argument("--model", type=str, default="gpt-4o-mini")
-    parser.add_argument("--mode", type=str, default="generate", choices=["generate", "mutate"])
-    parser.add_argument("--seed-dir", type=str, default=None)
-    args = parser.parse_args()
+def _build_parser() -> argparse.ArgumentParser:
+    gen = cfg.generation
+    mut = cfg.mutation
+    parser = argparse.ArgumentParser(
+        description="Run the full LLVM IR differential testing pipeline.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--gen-count",    type=int,   default=gen.count,   metavar="N",   help="Number of IR files to generate.")
+    parser.add_argument("--mut-per-file", type=int,   default=mut.per_file, metavar="N",  help="Mutations per dataset file.")
+    parser.add_argument("--backend",      default=gen.backend, choices=["template", "openai"], help="Generation backend.")
+    parser.add_argument("--model",        default=gen.model,   help="LLM model (openai backend only).")
+    parser.add_argument("--mode",         default=gen.mode,    choices=["generate", "mutate"], help="Generation mode.")
+    parser.add_argument("--seed-dir",     type=Path,  default=None, metavar="DIR", help="Seed directory for mutate mode.")
+    return parser
 
+
+def main() -> None:
+    args = _build_parser().parse_args()
     run_pipeline(
-        Path.cwd(),
-        gen_count=args.count,
-        mut_per_file=args.per_file,
-        backend=args.backend,
-        model=args.model,
-        mode=args.mode,
-        seed_dir=Path(args.seed_dir) if args.seed_dir else None,
+        root         = ROOT,
+        gen_count    = args.gen_count,
+        mut_per_file = args.mut_per_file,
+        backend      = args.backend,
+        model        = args.model,
+        mode         = args.mode,
+        seed_dir     = args.seed_dir,
     )
 
 

@@ -1,0 +1,209 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# config.yaml — project-wide configuration for the LLVM IR Differential Tester
+# Every numeric constant, path, tool name, and tunable knob lives here.
+# Edit this file instead of touching any Python source.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------------
+# Directory layout (all relative to the project root)
+# ---------------------------------------------------------------------------
+paths:
+  dataset:      dataset
+  generated:    generated_ir
+  mutated:      mutated_ir
+  valid:        valid_ir
+  invalid:      invalid_ir
+  logs:         logs
+  results:      results
+  evaluation:   evaluation
+  optimized:    results/optimized_ir
+  diffs:        results/code_diffs
+
+# ---------------------------------------------------------------------------
+# IR Generation settings
+# ---------------------------------------------------------------------------
+generation:
+  # How many IR files to generate per run
+  count: 10
+  # Random seed for reproducible template selection
+  seed: 1337
+  # Backend: "template" (no API needed) | "openai" | "anthropic"
+  backend: template
+  # LLM model name (only used when backend != "template")
+  model: gpt-4o-mini
+  # Generation mode: "generate" | "mutate"
+  mode: generate
+  # Prompt used for LLM generation (backend=openai/anthropic, mode=generate)
+  llm_prompt: >
+    Generate a single valid LLVM IR function.
+    Return only LLVM IR, no prose.
+    Constraints: SSA form, i32 ops, and end with ret.
+    Must be a zero-argument  define i32 @main().
+    Use opaque ptr syntax (ptr instead of i32*).
+  # Prompt used for LLM mutation (backend=openai/anthropic, mode=mutate)
+  llm_mutate_prompt: >
+    Mutate the following LLVM IR while keeping it valid.
+    Return only LLVM IR, no prose.
+    Prefer small edits: opcode swap, constant tweak, or control-flow split.
+    Do not change the function name from @main.
+
+# ---------------------------------------------------------------------------
+# Mutation settings
+# ---------------------------------------------------------------------------
+mutation:
+  # Number of mutations to apply per input file (dataset → mutated_ir)
+  per_file: 2
+  # Number of mutations for freshly generated files
+  per_generated_file: 1
+  # Random seed for mutation
+  seed: 1337
+  # Probability thresholds for each mutation strategy (0.0 – 1.0)
+  strategy_weights:
+    opcode_swap:       0.60   # replace one arithmetic opcode
+    dead_code:         0.45   # insert an unused computation
+    block_split:       0.35   # split entry block with an unconditional branch
+    cond_phi:          0.35   # insert a trivial conditional + phi
+    deep_cfg:          0.75   # insert a multi-level CFG diamond
+    const_tweak:       0.55   # replace one integer literal
+  # Maximum number of mutation strategies applied per file
+  max_strategies_per_file: 3
+
+# ---------------------------------------------------------------------------
+# Validation settings
+# ---------------------------------------------------------------------------
+validation:
+  # LLVM tools tried (in order) for validation
+  tools:
+    assembler: llvm-as
+    optimizer: opt
+  # Optional tools (skip gracefully if absent)
+  optional_tools:
+    alive2: alive-tv
+  # Environment variable that enables Alive2 semantic validation
+  alive2_env_var: ALIVE2_VALIDATE
+  # Environment variable that enables the mem2reg SSA repair pass
+  ssa_fix_env_var: SSA_FIX
+
+# ---------------------------------------------------------------------------
+# Execution settings
+# ---------------------------------------------------------------------------
+execution:
+  # Tool names
+  tools:
+    interpreter: lli
+    compiler:    clang
+    optimizer:   opt
+  # Per-command timeout in seconds
+  timeouts:
+    lli:      5
+    compile:  5
+    link:     5
+    run:      5
+    emit_ir:  10
+  # Optimisation levels to compare
+  opt_levels:
+    - O0
+    - O3
+
+# ---------------------------------------------------------------------------
+# Seed corpus (synthetic fallback when no dataset is present)
+# ---------------------------------------------------------------------------
+seed_corpus:
+  # File name written inside the dataset directory
+  filename: seed_sample.ll
+  # Number of sequential add i32 instructions in the synthetic chain
+  chain_length: 1500
+
+# ---------------------------------------------------------------------------
+# Reporting / metrics
+# ---------------------------------------------------------------------------
+reporting:
+  # File names written to results/ and evaluation/
+  files:
+    run_manifest:   run_manifest.json
+    executions:     executions.jsonl
+    diffs:          diffs.jsonl
+    skipped:        skipped_exec.jsonl
+    summary:        summary.md
+    triage:         triage.json
+    metrics_json:   metrics.json
+    metrics_csv:    metrics.csv
+    metrics_png:    metrics.png
+  # Bar-chart figure dimensions (width, height in inches) and DPI
+  chart:
+    width:  11.5
+    height: 5.5
+    dpi:    140
+  # Colours for the bar chart (one per metric bar)
+  chart_colors:
+    - "#7c3aed"   # Generated
+    - "#22c55e"   # Valid
+    - "#ef4444"   # Invalid
+    - "#0ea5e9"   # Executed
+    - "#f59e0b"   # Pairs
+    - "#6366f1"   # Diffs
+    - "#94a3b8"   # Skipped
+  # Maximum number of sample diffs shown in summary.md
+  max_sample_diffs: 5
+
+# ---------------------------------------------------------------------------
+# IR template system
+# ---------------------------------------------------------------------------
+templates:
+  # Fraction of the time a "heavy" (CFG-rich) template is preferred
+  heavy_bias: 0.85
+  # Names that are considered "heavy" (i.e., contain complex control flow)
+  heavy_names:
+    - dead_code_elimination
+    - branch_fanout
+    - multi_way_branch
+    - switch_lowering
+    - loop_invariant
+    - vector_pattern
+  # Per-template selection weights (higher = more likely to be chosen)
+  weights:
+    dead_code_elimination: 8
+    branch_fanout:         7
+    multi_way_branch:      6
+    switch_lowering:       5
+    loop_invariant:        4
+    vector_pattern:        3
+    array_promote:         3
+  # Size-padding decorator: chain length range added after ret
+  decorator:
+    chain_min:    6
+    chain_max:    32
+    chain_stride: 4   # extra steps per template index increment
+
+# ---------------------------------------------------------------------------
+# Varied binary-size generation (scripts/generate_varied_binary_sizes.py)
+# ---------------------------------------------------------------------------
+varied_binaries:
+  # Default random seed
+  seed: 1337
+  # Default number of files to generate
+  count: 10
+  # Base chain length; actual length = base + (seed+idx) % range
+  chain_base: 6
+  chain_range: 24
+  # Extra steps per template-index increment (creates gradual size differences)
+  chain_stride: 3
+  # Global blob size: base + (seed+idx % blob_mod) * blob_scale  bytes
+  blob_base: 8
+  blob_mod: 128
+  blob_scale: 4
+  # Dead-branch pad: number of ops = pad_base + (seed % pad_range)
+  pad_base: 4
+  pad_range: 8
+  # Default case labels (one per file; extend if count > 10)
+  labels:
+    - size_case_00
+    - size_case_01
+    - size_case_02
+    - size_case_03
+    - size_case_04
+    - size_case_05
+    - size_case_06
+    - size_case_07
+    - size_case_08
+    - size_case_09

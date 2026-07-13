@@ -1,56 +1,58 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# run.sh — Bootstrap the virtual environment, run the pipeline, then launch the UI.
+#
+# Usage:
+#   ./run.sh                      # template backend, defaults from config.yaml
+#   ./run.sh --backend openai     # OpenAI backend (set OPENAI_API_KEY in .env)
+#   ./run.sh --gen-count 20       # generate 20 IR files
+#
+# Any extra arguments are forwarded verbatim to main.py.
+
 set -euo pipefail
 
-# Create virtualenv if missing
-if [[ ! -d ".venv" ]]; then
-	echo "Creating virtualenv in .venv"
-	python3 -m venv .venv
+VENV_DIR="$(dirname "$0")/.venv"
+REQ_FILE="$(dirname "$0")/requirements.txt"
+HASH_FILE="${VENV_DIR}/.requirements.hash"
+
+# ── 1. Create virtualenv if absent ──────────────────────────────────────────
+if [[ ! -d "${VENV_DIR}" ]]; then
+    echo "[run.sh] Creating virtual environment in ${VENV_DIR}/"
+    python3 -m venv "${VENV_DIR}"
 fi
 
-# Activate virtualenv
+# ── 2. Activate ─────────────────────────────────────────────────────────────
 # shellcheck source=/dev/null
-source .venv/bin/activate
+source "${VENV_DIR}/bin/activate"
 
-REQ_HASH_FILE=".venv/.requirements.hash"
-CURRENT_REQ_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
-
-# Repair a partially created virtualenv that is missing pip.
+# Repair a partially-created venv missing pip
 python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
 
-if [[ -f "$REQ_HASH_FILE" ]] && [[ "$(cat "$REQ_HASH_FILE")" == "$CURRENT_REQ_HASH" ]]; then
-	echo "Dependencies are already installed; skipping pip install."
+# ── 3. Install / skip based on requirements hash ────────────────────────────
+CURRENT_HASH="$(sha256sum "${REQ_FILE}" | awk '{print $1}')"
+if [[ -f "${HASH_FILE}" && "$(cat "${HASH_FILE}")" == "${CURRENT_HASH}" ]]; then
+    echo "[run.sh] Dependencies up-to-date, skipping pip install."
 else
-	python3 -m pip install --upgrade pip
-	python3 -m pip install -r requirements.txt
-	printf '%s' "$CURRENT_REQ_HASH" > "$REQ_HASH_FILE"
+    echo "[run.sh] Installing dependencies from requirements.txt ..."
+    python3 -m pip install --upgrade pip --quiet
+    python3 -m pip install -r "${REQ_FILE}" --quiet
+    printf '%s' "${CURRENT_HASH}" > "${HASH_FILE}"
 fi
 
-# Optional: Set up your LLM credentials if running in 'openai' backend.
-# export OPENAI_API_KEY="your-api-key"
-
-echo "=========================================================="
-echo " Starting LLVM IR Differential Testing Pipeline (Backend) "
-echo "=========================================================="
-# By default, use the local "template" backend to avoid hitting API failures.
-# If you want to use genuine LLM synthesis, run with --backend openai and set OPENAI_API_KEY.
-python3 -u main.py --backend template
-
+# ── 4. Run the pipeline (forward any CLI args) ───────────────────────────────
 echo ""
-echo "=========================================================="
-echo " Starting Streamlit UI Dashboard (if installed) "
-echo "=========================================================="
-# Only run the Streamlit UI if streamlit is available in the environment
-if python3 - <<'PY'
-import sys
-try:
-	import streamlit
-except Exception:
-	sys.exit(2)
-sys.exit(0)
-PY
-then
-	python3 -m streamlit run ui_app.py
+echo "================================================================"
+echo " LLVM IR Differential Testing Pipeline"
+echo "================================================================"
+python3 -u main.py "$@"
+
+# ── 5. Launch Streamlit UI if available ──────────────────────────────────────
+echo ""
+echo "================================================================"
+echo " Streamlit Dashboard"
+echo "================================================================"
+if python3 -c "import streamlit" 2>/dev/null; then
+    python3 -m streamlit run ui_app.py
 else
-	echo "streamlit not installed in .venv; skipping UI launch. To run the dashboard, install streamlit:"
-	echo "  . .venv/bin/activate && pip install streamlit"
+    echo "[run.sh] streamlit not installed — skipping UI."
+    echo "         To enable: pip install streamlit  (or re-run run.sh)"
 fi

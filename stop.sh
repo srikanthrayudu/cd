@@ -1,14 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# stop.sh — Stop any running pipeline or dashboard processes.
 
-echo "=========================================================="
-echo " Stopping LLVM IR Differential Testing Pipeline and UI... "
-echo "=========================================================="
+set -euo pipefail
 
-# Kill any main.py processes
-pkill -f "python3 -u main.py" || echo "No main.py processes running."
+echo "Stopping pipeline (main.py) ..."
+pkill -f "python3.*main\.py"     2>/dev/null && echo "  stopped." || echo "  none running."
 
-# Kill any streamlit processes for ui_app.py
-pkill -f "streamlit run ui_app.py" || echo "No Streamlit UI processes running."
+echo "Stopping Streamlit dashboard (ui_app.py) ..."
+pkill -f "streamlit run ui_app"  2>/dev/null && echo "  stopped." || echo "  none running."
 
-echo "All related processes have been stopped."
-
+echo "Done."

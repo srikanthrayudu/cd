@@ -1,5 +1,15 @@
-# Python dependencies for the prototype (LLVM tools are system packages, see docs).
-openai>=1.0.0
-matplotlib>=3.7.0
-streamlit>=1.30.0
-pandas>=2.0.0
+# Runtime dependencies
+# Pin to tested lower bounds; update when upgrading the project.
+
+# Configuration loading
+PyYAML>=6.0.1,<7
+
+# LLM backend (optional — only needed when --backend openai)
+openai>=1.0.0,<2
+
+# Charts
+matplotlib>=3.7.0,<4
+
+# Streamlit dashboard (optional)
+streamlit>=1.30.0,<2
+pandas>=2.0.0,<3

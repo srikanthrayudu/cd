@@ -1,18 +1,53 @@
-.env
-.venv/
+# ─── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
-*.log
-results/
-logs/
-valid_ir/
-invalid_ir/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ─── Virtual environment ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ─── Secrets ──────────────────────────────────────────────────────────────────
+.env
+# keep .env.example (it contains no real secrets)
+
+# ─── Pipeline runtime artefacts ───────────────────────────────────────────────
 generated_ir/
 mutated_ir/
+valid_ir/
+invalid_ir/
+logs/
+results/
 evaluation/
-exec/
-*.bc
-*.ll
+tmp_template_qa/
 
+# Keep the dataset seed corpus
+!dataset/seed_sample.ll
+
+# ─── Test artefacts ───────────────────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ─── Compiled IR / binaries produced during execution ─────────────────────────
+*.bc
+*.o
+*.exe
+test_O0.exe
+test_O3.exe
+
+# ─── IDE / OS ─────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

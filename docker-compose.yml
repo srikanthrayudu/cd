@@ -1,16 +1,25 @@
-version: '3.8'
+# docker-compose.yml — LLVM IR Differential Testing project
+#
+# Usage:
+#   docker compose up --build          # build and run
+#   docker compose up -d               # detached
+#   docker compose down                # stop and remove container
+#
+# The project root is mounted at /workspace so generated files
+# (results/, evaluation/, logs/) are written to the host filesystem.
 
 services:
   cd-app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: cd_app
     restart: unless-stopped
     ports:
-      - "8501:8501" # streamlit
+      - "8501:8501"        # Streamlit dashboard
     volumes:
-      - ./:/workspace
+      - ./:/workspace      # live mount — edits on host are reflected immediately
     environment:
-      # Forward OpenAI key if present in host env
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}   # pass from host env if set
     tty: true
-
+    stdin_open: true

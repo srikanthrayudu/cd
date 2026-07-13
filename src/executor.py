@@ -1,143 +1,235 @@
+"""
+executor.py — IR execution and binary-size measurement.
+
+Three public functions:
+
+``run_lli``        — interpret an IR file with the LLVM interpreter.
+``run_clang``      — compile an IR file with clang at a given optimisation
+                     level, measure the object-file size, then run the binary.
+``emit_optimized_ir`` — produce textual LLVM IR after running opt at a given
+                     optimisation level (used for diff analysis).
+
+All tool names and timeout values come from ``cfg`` (config.yaml →
+execution section) so nothing is hardcoded here.
+"""
 from __future__ import annotations
 
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
+from src.config import cfg
+
+
+# ---------------------------------------------------------------------------
+# Result dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ExecutionResult:
-    name: str
-    mode: str
-    exit_code: Optional[int]
-    stdout: str
-    stderr: str
-    skipped: bool
-    reason: str
-    compile_exit_code: Optional[int] = None
-    compile_stdout: str = ""
-    compile_stderr: str = ""
-    binary_size: Optional[int] = None
+    """Outcome of executing one IR file under one mode."""
+    name:              str
+    mode:              str               # "lli" | "O0" | "O3" | …
+    exit_code:         Optional[int]
+    stdout:            str
+    stderr:            str
+    skipped:           bool
+    reason:            str               # "ok" | "missing_<tool>" | "timeout" | "compile_failed" | …
+    compile_exit_code: Optional[int]     = field(default=None)
+    compile_stdout:    str               = field(default="")
+    compile_stderr:    str               = field(default="")
+    binary_size:       Optional[int]     = field(default=None)
 
 
-def _has_tool(tool: str) -> bool:
-    return shutil.which(tool) is not None
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _tool_on_path(name: str) -> bool:
+    return shutil.which(name) is not None
 
 
-def _run_command(cmd: list[str], timeout: int) -> tuple[int, str, str]:
-    completed = subprocess.run(
+def _run(cmd: list, timeout: int) -> Tuple[int, str, str]:
+    """Run *cmd* and return (returncode, stdout, stderr).  Raises TimeoutExpired."""
+    result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
     )
-    return completed.returncode, completed.stdout, completed.stderr
+    return result.returncode, result.stdout, result.stderr
 
 
-def run_lli(file_path: Path, timeout: int = 5) -> ExecutionResult:
-    if not _has_tool("lli"):
-        return ExecutionResult(file_path.stem, "lli", None, "", "", True, "missing_lli")
-    try:
-        code, out, err = _run_command(["lli", str(file_path)], timeout)
-        return ExecutionResult(file_path.stem, "lli", code, out, err, False, "ok")
-    except subprocess.TimeoutExpired:
-        return ExecutionResult(file_path.stem, "lli", None, "", "timeout", False, "timeout")
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
+def run_lli(file_path: Path) -> ExecutionResult:
+    """
+    Interpret *file_path* using the LLVM interpreter (lli).
 
-def run_clang(file_path: Path, opt_level: str, timeout: int = 5) -> ExecutionResult:
-    if not _has_tool("clang"):
-        return ExecutionResult(file_path.stem, opt_level, None, "", "", True, "missing_clang")
-    # Compile to an object file first and measure the object size. Object
-    # sizes reflect codegen differences more directly and avoid linker
-    # noise that can make O0/O3 sizes look identical. Then link the
-    # object to an executable so we can run it for behavioral checks.
-    out_o = file_path.with_suffix(f".{opt_level}.o")
-    out_exe = file_path.with_suffix(f".{opt_level}.exe")
-    try:
-        # Compile to object
-        compile_code, compile_out, compile_err = _run_command(
-            ["clang", "-c", str(file_path), f"-{opt_level}", "-o", str(out_o)],
-            timeout,
+    Returns a skipped result immediately when lli is not on PATH.
+    """
+    tool = cfg.execution.interpreter
+
+    if not _tool_on_path(tool):
+        return ExecutionResult(
+            name     = file_path.stem,
+            mode     = "lli",
+            exit_code= None,
+            stdout   = "",
+            stderr   = "",
+            skipped  = True,
+            reason   = f"missing_{tool}",
         )
-        if compile_code != 0:
+    try:
+        code, out, err = _run([tool, str(file_path)], cfg.execution.timeouts.lli)
+        return ExecutionResult(
+            name      = file_path.stem,
+            mode      = "lli",
+            exit_code = code,
+            stdout    = out,
+            stderr    = err,
+            skipped   = False,
+            reason    = "ok",
+        )
+    except subprocess.TimeoutExpired:
+        return ExecutionResult(
+            name      = file_path.stem,
+            mode      = "lli",
+            exit_code = None,
+            stdout    = "",
+            stderr    = "timeout",
+            skipped   = False,
+            reason    = "timeout",
+        )
+
+
+def run_clang(file_path: Path, opt_level: str) -> ExecutionResult:
+    """
+    Compile *file_path* at *opt_level* (e.g. ``"O0"`` or ``"O3"``) using
+    clang, measure the object-file size, link to an executable, and run it.
+
+    Using an object file rather than a final linked binary makes the size
+    comparison more sensitive to code-generation differences.
+
+    Returns a skipped result when clang is not on PATH.
+    """
+    tool = cfg.execution.compiler
+    t    = cfg.execution.timeouts
+
+    if not _tool_on_path(tool):
+        return ExecutionResult(
+            name      = file_path.stem,
+            mode      = opt_level,
+            exit_code = None,
+            stdout    = "",
+            stderr    = "",
+            skipped   = True,
+            reason    = f"missing_{tool}",
+        )
+
+    out_o   = file_path.with_suffix(f".{opt_level}.o")
+    out_exe = file_path.with_suffix(f".{opt_level}.exe")
+
+    try:
+        # ── Step 1: compile to object ──────────────────────────────────────
+        cc, co, ce = _run(
+            [tool, "-c", str(file_path), f"-{opt_level}", "-o", str(out_o)],
+            t.compile,
+        )
+        if cc != 0:
             return ExecutionResult(
-                file_path.stem,
-                opt_level,
-                None,
-                "",
-                "",
-                False,
-                "compile_failed",
-                compile_exit_code=compile_code,
-                compile_stdout=compile_out,
-                compile_stderr=compile_err,
+                name              = file_path.stem,
+                mode              = opt_level,
+                exit_code         = None,
+                stdout            = "",
+                stderr            = "",
+                skipped           = False,
+                reason            = "compile_failed",
+                compile_exit_code = cc,
+                compile_stdout    = co,
+                compile_stderr    = ce,
             )
 
-        # Measure object size (more sensitive to opt level differences)
+        # ── Step 2: measure object size ────────────────────────────────────
         try:
-            bin_size = out_o.stat().st_size
-        except Exception:
+            bin_size: Optional[int] = out_o.stat().st_size
+        except OSError:
             bin_size = None
 
-        # Link the object to produce an executable so we can run it
-        link_code, link_out, link_err = _run_command(["clang", str(out_o), "-o", str(out_exe)], timeout)
-        if link_code != 0:
-            # Linking failed; still return compile info
+        # ── Step 3: link to executable ─────────────────────────────────────
+        lc, lo, le = _run([tool, str(out_o), "-o", str(out_exe)], t.link)
+        if lc != 0:
             return ExecutionResult(
-                file_path.stem,
-                opt_level,
-                None,
-                "",
-                "",
-                False,
-                "link_failed",
-                compile_exit_code=compile_code,
-                compile_stdout=compile_out + link_out,
-                compile_stderr=compile_err + link_err,
-                binary_size=bin_size,
+                name              = file_path.stem,
+                mode              = opt_level,
+                exit_code         = None,
+                stdout            = "",
+                stderr            = "",
+                skipped           = False,
+                reason            = "link_failed",
+                compile_exit_code = cc,
+                compile_stdout    = co + lo,
+                compile_stderr    = ce + le,
+                binary_size       = bin_size,
             )
 
-        # Run the produced executable for behavioral observation
-        code, out, err = _run_command([str(out_exe)], timeout)
+        # ── Step 4: run the executable ─────────────────────────────────────
+        rc, ro, re_ = _run([str(out_exe)], t.run)
         return ExecutionResult(
-            file_path.stem,
-            opt_level,
-            code,
-            out,
-            err,
-            False,
-            "ok",
-            compile_exit_code=compile_code,
-            compile_stdout=compile_out + link_out,
-            compile_stderr=compile_err + link_err,
-            binary_size=bin_size,
+            name              = file_path.stem,
+            mode              = opt_level,
+            exit_code         = rc,
+            stdout            = ro,
+            stderr            = re_,
+            skipped           = False,
+            reason            = "ok",
+            compile_exit_code = cc,
+            compile_stdout    = co + lo,
+            compile_stderr    = ce + le,
+            binary_size       = bin_size,
         )
+
     except subprocess.TimeoutExpired:
         return ExecutionResult(
-            file_path.stem,
-            opt_level,
-            None,
-            "",
-            "timeout",
-            False,
-            "timeout",
+            name      = file_path.stem,
+            mode      = opt_level,
+            exit_code = None,
+            stdout    = "",
+            stderr    = "timeout",
+            skipped   = False,
+            reason    = "timeout",
         )
+
     finally:
-        if out_exe.exists():
-            out_exe.unlink()
-        if out_o.exists():
-            out_o.unlink()
+        # Always clean up temporary files
+        for tmp in (out_o, out_exe):
+            if tmp.exists():
+                tmp.unlink()
 
 
-def emit_optimized_ir(file_path: Path, opt_level: str, timeout: int = 10) -> tuple[bool, str, str]:
-    """Return (ok, stdout, stderr) for textual LLVM IR after applying opt level."""
-    if not _has_tool("opt"):
-        return False, "", "missing_opt"
+def emit_optimized_ir(file_path: Path, opt_level: str) -> Tuple[bool, str, str]:
+    """
+    Run ``opt -S -<opt_level>`` on *file_path* and return
+    ``(success, stdout_ir_text, stderr_text)``.
+
+    Used to produce the human-readable textual IR for diff analysis.
+    Returns ``(False, "", "missing_opt")`` when opt is unavailable.
+    """
+    tool = cfg.execution.optimizer
+
+    if not _tool_on_path(tool):
+        return False, "", f"missing_{tool}"
+
     try:
-        code, out, err = _run_command(["opt", "-S", f"-{opt_level}", str(file_path)], timeout)
+        code, out, err = _run(
+            [tool, "-S", f"-{opt_level}", str(file_path)],
+            cfg.execution.timeouts.emit_ir,
+        )
         return code == 0, out, err
+
     except subprocess.TimeoutExpired:
         return False, "", "timeout"
-
