@@ -122,6 +122,75 @@ def _write_run_manifest(
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
+def _append_run_history(history_path: Path, metrics: object, counts: Dict[str, int]) -> None:
+    """
+    Append a compact single-line JSON record to *history_path* (JSONL).
+
+    Each record captures the timestamp, pipeline counts, key aggregate metrics,
+    and per-strategy diff rates so cross-run trends can be analysed later.
+    """
+    m = metrics
+    record = {
+        "timestamp":            datetime.now(timezone.utc).isoformat(),
+        "generated":            counts.get("generated", 0),
+        "mutated":              counts.get("mutated", 0),
+        "valid":                counts.get("valid", 0),
+        "invalid":              counts.get("invalid", 0),
+        "diffs":                getattr(m, "diffs", 0),
+        "paired_binary_cases":  getattr(m, "paired_binary_cases", 0),
+        "binary_savings":       getattr(m, "binary_savings", 0),
+        "binary_reduction_pct": round(getattr(m, "binary_reduction_pct", 0.0), 4),
+        "compile_failed":       getattr(m, "compile_failed", 0),
+        "timeouts":             getattr(m, "timeouts", 0),
+        "strategy_diff_rates":  getattr(m, "strategy_diff_rates", {}),
+    }
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with history_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def _collect_diff_seeds(
+    diffs_path:  Path,
+    valid_dir:   Path,
+    seeds_dir:   Path,
+) -> int:
+    """
+    Copy IR files that produced behavioural diffs into *seeds_dir* so the
+    next mutation round uses them as high-value seeds.
+
+    Returns the number of seed files written.
+    """
+    seeds_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+
+    if not diffs_path.exists():
+        return 0
+
+    seen: set = set()
+    for raw in diffs_path.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        name = str(row.get("name", ""))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+
+        src = valid_dir / f"{name}.ll"
+        if not src.exists():
+            continue
+
+        dst = seeds_dir / f"seed_{name}.ll"
+        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        written += 1
+
+    return written
+
+
 def _write_log(log_path: Path, text: str) -> None:
     log_path.write_text(text, encoding="utf-8")
 
@@ -338,6 +407,18 @@ def run_pipeline(
             seed         = mut_seed,
             mutation_log = mutation_log_path,
         )
+        # Feedback loop: re-mutate files that produced diffs in a previous run
+        feedback_seeds_dir = root / "feedback_seeds"
+        if feedback_seeds_dir.exists() and any(feedback_seeds_dir.glob("*.ll")):
+            n_feedback = len(list(feedback_seeds_dir.glob("*.ll")))
+            print(f"       → replaying {n_feedback} feedback seeds ...", flush=True)
+            mutated += mutate_files(
+                feedback_seeds_dir,
+                paths.mutated_dir,
+                per_file     = max(mut_per_file, cfg.mutation.per_generated_file),
+                seed         = mut_seed,
+                mutation_log = mutation_log_path,
+            )
         print(f"       → {len(mutated)} mutated variants", flush=True)
 
         print("[3/5] Validating IR files ...", flush=True)
@@ -431,10 +512,21 @@ def run_pipeline(
     write_csv(metrics,     paths.evaluation_dir / file_names["metrics_csv"])
     write_bar_chart(metrics, paths.evaluation_dir / file_names["metrics_png"])
 
+    # Append this run's key metrics to a persistent history log
+    history_path = paths.results_dir / "history.jsonl"
+    _append_run_history(history_path, metrics, counts)
+
     summary = build_summary(paths.results_dir, paths.evaluation_dir)
     write_summary(summary, paths.results_dir / file_names["summary"])
 
     triage = build_triage(paths.results_dir)
     write_triage(triage, paths.results_dir / file_names["triage"])
+
+    # ── Feedback loop: seed next run with diff-producing files ─────────────
+    seeds_dir  = root / "feedback_seeds"
+    n_seeds    = _collect_diff_seeds(diffs_path, paths.valid_dir, seeds_dir)
+    if n_seeds:
+        print(f"       → {n_seeds} diff-producing files saved to "
+              f"{seeds_dir.relative_to(root)} for next-run seeding", flush=True)
 
     _print_summary_table(counts, metrics_json_path)

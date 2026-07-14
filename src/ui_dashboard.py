@@ -134,6 +134,11 @@ def _load_snapshot() -> dict[str, Any]:
     # Binary-size comparisons from execution log
     o0: dict[str, int] = {}
     o3: dict[str, int] = {}
+    # Instruction count aggregates
+    o0_instr_list: list[int]   = []
+    o3_instr_list: list[int]   = []
+    instr_pct_list: list[float] = []
+
     for row in exec_rows:
         name = row.get("name")
         size = row.get("binary_size")
@@ -142,6 +147,16 @@ def _load_snapshot() -> dict[str, Any]:
                 o0[str(name)] = int(size)
             elif row.get("mode") == "O3":
                 o3[str(name)] = int(size)
+        # Instruction counts are stored on O0 records
+        if row.get("mode") == "O0":
+            ic0 = row.get("o0_instr_count")
+            ic3 = row.get("o3_instr_count")
+            pct = row.get("instr_reduction_pct")
+            if isinstance(ic0, (int, float)) and isinstance(ic3, (int, float)):
+                o0_instr_list.append(int(ic0))
+                o3_instr_list.append(int(ic3))
+            if isinstance(pct, (int, float)):
+                instr_pct_list.append(float(pct))
 
     paired        = sorted(set(o0) & set(o3))
     binary_savings= sum(o0[n] - o3[n] for n in paired)
@@ -154,6 +169,13 @@ def _load_snapshot() -> dict[str, Any]:
         v = manifest.get(k)
         if v is not None:
             run_meta[k] = str(v)
+
+    # Per-strategy diff rates from metrics.json
+    strategy_diff_rates: dict[str, float] = {}
+    raw_rates = metrics.get("strategy_diff_rates")
+    if isinstance(raw_rates, dict):
+        strategy_diff_rates = {k: float(v) for k, v in raw_rates.items()
+                               if isinstance(v, (int, float))}
 
     return {
         # Counts
@@ -178,6 +200,14 @@ def _load_snapshot() -> dict[str, Any]:
         "paired_binary_cases": len(paired),
         "binary_savings":      binary_savings,
         "binary_reduction_pct": reduction_pct,
+        # Instruction counts
+        "total_o0_instructions":   sum(o0_instr_list),
+        "total_o3_instructions":   sum(o3_instr_list),
+        "total_instr_eliminated":  sum(o0_instr_list) - sum(o3_instr_list),
+        "avg_instr_reduction_pct": round(sum(instr_pct_list) / len(instr_pct_list), 2) if instr_pct_list else 0.0,
+        "files_with_instr_data":   len(o0_instr_list),
+        # Strategy rates
+        "strategy_diff_rates": strategy_diff_rates,
         # Metadata
         "run_metadata":  run_meta,
         "metrics_raw":   metrics,
@@ -401,6 +431,95 @@ def _page_overview(snap: dict[str, Any]) -> None:
             '<div class="panel-subtitle">Each stage feeds the next; all paths and tool names come from config.yaml.</div>'
             '<ul style="color:#d9e4f4;margin:.4rem 0 0 1.1rem;">'
             '<li><b>IR Generation</b> — template-based or LLM-backed (openai)</li>'
+            '<li><b>Mutation</b> — opcode swap, dead code, CFG splits, loops, calls, vectors</li>'
+            '<li><b>Validation</b> — llvm-as + opt verify, or regex fallback</li>'
+            '<li><b>Execution</b> — lli (interpret) + clang -O0 / -O3 (compile + run)</li>'
+            '<li><b>Analysis</b> — binary-size diff, textual IR diff, instruction count diff</li>'
+            '<li><b>Feedback loop</b> — diff-producing files become seeds for next run</li>'
+            '</ul></div>',
+            unsafe_allow_html=True,
+        )
+        png_path = EVAL_DIR / _FILES["metrics_png"]
+        if png_path.exists():
+            st.image(str(png_path), caption="Pipeline snapshot", use_container_width=True)
+        else:
+            st.info("Run the pipeline to generate evaluation/metrics.png.")
+
+    with right:
+        required = [cfg.execution.interpreter, cfg.execution.compiler, cfg.execution.optimizer,
+                    cfg.validation.assembler_tool]
+        missing  = [t for t in required if not _tool_ok(t)]
+        c1, c2 = st.columns(2)
+        c1.metric("Tools present", len(required) - len(missing), f"/{len(required)}")
+        c2.metric("Missing",       len(missing), ", ".join(missing) or "none")
+
+        meta = snap.get("run_metadata", {})
+        if meta:
+            st.markdown('<div class="panel"><div class="panel-title">Last run</div></div>',
+                        unsafe_allow_html=True)
+            for k in ("generated_at", "backend", "model", "mode", "gen_count", "mut_per_file"):
+                if k in meta:
+                    st.write(f"• **{k}**: `{meta[k]}`")
+
+    # ── Instruction-count stats ────────────────────────────────────────────
+    if snap.get("files_with_instr_data", 0) > 0:
+        st.markdown("### Instruction-Count Reduction (O0 → O3)")
+        _metric_cards([
+            {"label": "O0 Instructions",  "value": f"{snap['total_o0_instructions']:,}"},
+            {"label": "O3 Instructions",  "value": f"{snap['total_o3_instructions']:,}"},
+            {"label": "Eliminated",       "value": f"{snap['total_instr_eliminated']:,}",
+             "tone": "ok" if snap["total_instr_eliminated"] > 0 else "warn"},
+            {"label": "Avg Reduction",    "value": f"{snap['avg_instr_reduction_pct']:.1f}%",
+             "delta": f"across {snap['files_with_instr_data']} files"},
+        ])
+
+    # ── Per-strategy diff rate chart ───────────────────────────────────────
+    rates = snap.get("strategy_diff_rates", {})
+    if rates:
+        st.markdown("### Strategy Diff Rates")
+        st.caption("How often each mutation strategy produced a behavioural diff (O0 ≠ O3 output)")
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import io
+
+            strategies = sorted(rates, key=lambda k: -rates[k])
+            values     = [rates[s] for s in strategies]
+            colors     = ["#ef4444" if v > 10 else "#f59e0b" if v > 0 else "#94a3b8" for v in values]
+
+            fig, ax = plt.subplots(figsize=(10, max(3, len(strategies) * 0.5)),
+                                   facecolor="#09101c")
+            ax.set_facecolor("#09101c")
+            bars = ax.barh(strategies, values, color=colors)
+            ax.set_xlabel("Diff Rate (%)", color="#cbd5e1")
+            ax.tick_params(colors="#cbd5e1")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            for spine in ("left", "bottom"):
+                ax.spines[spine].set_color("#334155")
+            ax.xaxis.label.set_color("#cbd5e1")
+            for bar, val in zip(bars, values):
+                ax.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2,
+                        f"{val:.1f}%", va="center", color="#e2e8f0", fontsize=9)
+            fig.tight_layout()
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
+            plt.close(fig)
+            buf.seek(0)
+            st.image(buf, use_container_width=True)
+        except Exception:
+            # Fallback: plain table
+            st.dataframe(
+                [{"Strategy": k, "Diff Rate (%)": v} for k, v in
+                 sorted(rates.items(), key=lambda kv: -kv[1])],
+                use_container_width=True,
+                hide_index=True,
+            )
+            '<div class="panel-subtitle">Each stage feeds the next; all paths and tool names come from config.yaml.</div>'
+            '<ul style="color:#d9e4f4;margin:.4rem 0 0 1.1rem;">'
+            '<li><b>IR Generation</b> — template-based or LLM-backed (openai)</li>'
             '<li><b>Mutation</b> — opcode swap, dead code, CFG splits, constant tweaks</li>'
             '<li><b>Validation</b> — llvm-as + opt verify, or regex fallback</li>'
             '<li><b>Execution</b> — lli (interpret) + clang -O0 / -O3 (compile + run)</li>'
@@ -590,6 +709,103 @@ def _page_logs(snap: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Page: Run History
+# ---------------------------------------------------------------------------
+
+def _page_history() -> None:
+    st.markdown("## Run History")
+    st.caption("Metrics appended to results/history.jsonl after every pipeline run")
+
+    history_path = RESULTS_DIR / "history.jsonl"
+    if not history_path.exists():
+        st.info("No history yet. Run the pipeline at least once to start recording history.")
+        return
+
+    rows = _read_jsonl(history_path)
+    if not rows:
+        st.info("history.jsonl is empty.")
+        return
+
+    # Normalise rows for display
+    display = []
+    for r in rows:
+        display.append({
+            "Timestamp":          r.get("timestamp", "")[:19].replace("T", " "),
+            "Generated":          r.get("generated", 0),
+            "Mutated":            r.get("mutated", 0),
+            "Valid":              r.get("valid", 0),
+            "Diffs":              r.get("diffs", 0),
+            "Pairs":              r.get("paired_binary_cases", 0),
+            "Savings (bytes)":    r.get("binary_savings", 0),
+            "Reduction (%)":      round(float(r.get("binary_reduction_pct", 0)), 2),
+            "Compile Failures":   r.get("compile_failed", 0),
+            "Timeouts":           r.get("timeouts", 0),
+        })
+
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+    # Trend chart: diffs and savings over runs
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import io
+
+        run_nums    = list(range(1, len(rows) + 1))
+        diffs_vals  = [r.get("diffs", 0) for r in rows]
+        savings_vals= [r.get("binary_savings", 0) for r in rows]
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 5), facecolor="#09101c")
+        for ax in (ax1, ax2):
+            ax.set_facecolor("#09101c")
+            ax.tick_params(colors="#cbd5e1")
+            for spine in ("top", "right"):
+                ax.spines[spine].set_visible(False)
+            for spine in ("left", "bottom"):
+                ax.spines[spine].set_color("#334155")
+
+        ax1.plot(run_nums, diffs_vals,  color="#ef4444", marker="o", linewidth=2, label="Diffs")
+        ax1.set_ylabel("Output Diffs", color="#cbd5e1")
+        ax1.legend(facecolor="#0f172a", labelcolor="#e2e8f0")
+
+        ax2.plot(run_nums, savings_vals, color="#22c55e", marker="s", linewidth=2, label="Binary Savings (bytes)")
+        ax2.set_ylabel("Savings (bytes)", color="#cbd5e1")
+        ax2.set_xlabel("Run #", color="#cbd5e1")
+        ax2.legend(facecolor="#0f172a", labelcolor="#e2e8f0")
+
+        fig.suptitle("Pipeline Trends Across Runs", color="#f8fafc", fontsize=12)
+        fig.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        st.image(buf, use_container_width=True)
+    except Exception:
+        pass  # chart is optional — table is already shown above
+
+    # Strategy diff rates per run
+    strategy_runs: dict[str, list] = {}
+    for r in rows:
+        for strat, rate in r.get("strategy_diff_rates", {}).items():
+            strategy_runs.setdefault(strat, []).append(rate)
+
+    if strategy_runs:
+        st.markdown("### Strategy Diff Rates Over Time")
+        st.caption("Each cell is the diff rate (%) for that strategy in that run")
+        table = []
+        n_runs = len(rows)
+        for strat, rates_list in sorted(strategy_runs.items()):
+            # Pad with None if strategy didn't appear in every run
+            padded = [None] * (n_runs - len(rates_list)) + rates_list
+            row_d: dict[str, Any] = {"Strategy": strat}
+            for i, v in enumerate(padded, 1):
+                row_d[f"Run {i}"] = f"{v:.1f}%" if v is not None else "—"
+            table.append(row_d)
+        st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
 # Main dashboard entry point
 # ---------------------------------------------------------------------------
 
@@ -629,7 +845,7 @@ def run_dashboard() -> None:
         st.caption("Navigation")
         page = st.radio(
             "",
-            ["Overview", "Optimization Artifacts", "Diff Viewer", "Logs"],
+            ["Overview", "Optimization Artifacts", "Diff Viewer", "Logs", "Run History"],
             label_visibility="collapsed",
         )
         st.divider()
@@ -698,5 +914,9 @@ def run_dashboard() -> None:
         _page_artifacts(snap)
     elif page == "Diff Viewer":
         _page_diff_viewer(snap)
+    elif page == "Logs":
+        _page_logs(snap)
+    elif page == "Run History":
+        _page_history()
     else:
         _page_logs(snap)

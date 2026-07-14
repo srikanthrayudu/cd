@@ -25,13 +25,21 @@ from src.config import cfg
 @dataclass
 class SummaryReport:
     """All data needed to render a human-readable pipeline summary."""
-    totals:           Dict[str, int]
-    diff_reasons:     Dict[str, int]
-    sample_diffs:     List[dict]
-    notes:            List[str]
-    size_comparisons: List[dict]
-    metrics_snapshot: Dict[str, Any]
-    run_metadata:     Dict[str, str]
+    totals:              Dict[str, int]
+    diff_reasons:        Dict[str, int]
+    sample_diffs:        List[dict]
+    notes:               List[str]
+    size_comparisons:    List[dict]
+    metrics_snapshot:    Dict[str, Any]
+    run_metadata:        Dict[str, str]
+    instr_stats:         Dict[str, Any]   = None   # type: ignore[assignment]
+    strategy_diff_rates: Dict[str, float] = None   # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.instr_stats is None:
+            self.instr_stats = {}
+        if self.strategy_diff_rates is None:
+            self.strategy_diff_rates = {}
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +132,48 @@ def _collect_metrics_snapshot(metrics: dict) -> Dict[str, Any]:
     }
 
 
+def _collect_instr_stats(exec_rows: List[dict]) -> Dict[str, Any]:
+    """
+    Aggregate instruction-count statistics from execution records.
+
+    The O0 execution records carry o0_instr_count / o3_instr_count /
+    instr_delta / instr_reduction_pct fields written by _process_file_worker.
+    Returns an empty dict if none are present (older runs without these fields).
+    """
+    o0_counts: List[int]   = []
+    o3_counts: List[int]   = []
+    deltas:    List[int]   = []
+    pcts:      List[float] = []
+
+    for row in exec_rows:
+        if row.get("mode") != "O0":
+            continue
+        o0    = row.get("o0_instr_count")
+        o3    = row.get("o3_instr_count")
+        delta = row.get("instr_delta")
+        pct   = row.get("instr_reduction_pct")
+        if isinstance(o0, (int, float)) and isinstance(o3, (int, float)):
+            o0_counts.append(int(o0))
+            o3_counts.append(int(o3))
+        if isinstance(delta, (int, float)):
+            deltas.append(int(delta))
+        if isinstance(pct, (int, float)):
+            pcts.append(float(pct))
+
+    if not o0_counts:
+        return {}
+
+    return {
+        "total_o0_instructions":   sum(o0_counts),
+        "total_o3_instructions":   sum(o3_counts),
+        "total_instr_eliminated":  sum(deltas),
+        "avg_instr_reduction_pct": round(sum(pcts) / len(pcts), 2) if pcts else 0.0,
+        "max_instr_reduction_pct": round(max(pcts), 2) if pcts else 0.0,
+        "min_instr_reduction_pct": round(min(pcts), 2) if pcts else 0.0,
+        "files_with_instr_data":   len(o0_counts),
+    }
+
+
 def _format_metric(key: str, value: Any) -> str:
     if key == "binary_reduction_pct":
         return f"{float(value):.2f}%"
@@ -159,6 +209,17 @@ def build_summary(results_dir: Path, evaluation_dir: Path) -> SummaryReport:
     counts       = _collect_counts(manifest)
     run_metadata = _collect_run_metadata(manifest)
     snapshot     = _collect_metrics_snapshot(metrics)
+    instr_stats  = _collect_instr_stats(executions)
+
+    # Per-strategy diff rates from metrics.json (written by compute_metrics)
+    strategy_diff_rates: Dict[str, float] = {}
+    raw_rates = metrics.get("strategy_diff_rates")
+    if isinstance(raw_rates, dict):
+        strategy_diff_rates = {
+            k: float(v)
+            for k, v in raw_rates.items()
+            if isinstance(v, (int, float))
+        }
 
     totals: Dict[str, int] = {
         "executions": len(executions),
@@ -228,13 +289,15 @@ def build_summary(results_dir: Path, evaluation_dir: Path) -> SummaryReport:
         })
 
     return SummaryReport(
-        totals           = totals,
-        diff_reasons     = diff_reasons,
-        sample_diffs     = sample_diffs,
-        notes            = notes,
-        size_comparisons = size_comparisons,
-        metrics_snapshot = snapshot,
-        run_metadata     = run_metadata,
+        totals               = totals,
+        diff_reasons         = diff_reasons,
+        sample_diffs         = sample_diffs,
+        notes                = notes,
+        size_comparisons     = size_comparisons,
+        metrics_snapshot     = snapshot,
+        run_metadata         = run_metadata,
+        instr_stats          = instr_stats,
+        strategy_diff_rates  = strategy_diff_rates,
     )
 
 
@@ -327,5 +390,29 @@ def write_summary(report: SummaryReport, output_path: Path) -> None:
         lines.append("## Notes")
         for note in report.notes:
             lines.append(f"- {note}")
+
+    # ── Instruction-count statistics ───────────────────────────────────────
+    if report.instr_stats:
+        lines.append("")
+        lines.append("## Instruction-Count Statistics (O0 → O3)")
+        s = report.instr_stats
+        lines.append(f"- Total O0 instructions: {s.get('total_o0_instructions', 0):,}")
+        lines.append(f"- Total O3 instructions: {s.get('total_o3_instructions', 0):,}")
+        lines.append(f"- Total eliminated:      {s.get('total_instr_eliminated', 0):,}")
+        lines.append(f"- Average reduction:     {s.get('avg_instr_reduction_pct', 0.0):.2f}%")
+        lines.append(f"- Max reduction:         {s.get('max_instr_reduction_pct', 0.0):.2f}%")
+        lines.append(f"- Min reduction:         {s.get('min_instr_reduction_pct', 0.0):.2f}%")
+        lines.append(f"- Files with data:       {s.get('files_with_instr_data', 0)}")
+
+    # ── Per-strategy diff rates ────────────────────────────────────────────
+    if report.strategy_diff_rates:
+        lines.append("")
+        lines.append("## Per-Strategy Diff Rates")
+        lines.append("| Strategy | Diff Rate (%) |")
+        lines.append("| :--- | :---: |")
+        for strategy, rate in sorted(
+            report.strategy_diff_rates.items(), key=lambda kv: -kv[1]
+        ):
+            lines.append(f"| {strategy} | {rate:.2f}% |")
 
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
