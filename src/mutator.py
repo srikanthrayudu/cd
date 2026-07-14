@@ -217,16 +217,191 @@ def _strategy_const_tweak(text: str, rng: random.Random) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Strategy 7: Loop insertion
+# ---------------------------------------------------------------------------
+
+def _strategy_loop_insert(text: str, rng: random.Random) -> str:
+    """
+    Wrap the entry block's return value in a counted accumulator loop.
+
+    The loop runs a fixed number of times (between 4 and 16), accumulating
+    the original return value on each iteration.  O3 unrolls or strength-
+    reduces the whole thing; O0 emits every iteration.
+    """
+    m = re.search(r"\nentry:\n([\s\S]*?)\n}\n?", text)
+    if not m:
+        return text
+    body  = m.group(1)
+    if "br " in body:
+        return text  # skip if CFG already has control flow
+    ret_m = re.search(r"\s+ret i32 (.+)", body)
+    if not ret_m:
+        return text
+
+    ret_val  = ret_m.group(1).strip()
+    t        = rng.randint(1000, 9999)
+    trip     = rng.randint(4, 16)          # loop trip count (constant)
+
+    # Replace the ret with a branch into the loop header
+    new_body = re.sub(r"\s+ret i32 .+", f"  br label %loop_{t}", body)
+
+    loop_block = (
+        f"loop_{t}:\n"
+        f"  %i_{t}   = phi i32 [ 0, %entry ], [ %i_next_{t}, %loop_{t} ]\n"
+        f"  %acc_{t} = phi i32 [ 0, %entry ], [ %acc_next_{t}, %loop_{t} ]\n"
+        f"  %acc_next_{t} = add i32 %acc_{t}, {ret_val}\n"
+        f"  %i_next_{t}   = add i32 %i_{t}, 1\n"
+        f"  %cond_{t}     = icmp slt i32 %i_next_{t}, {trip}\n"
+        f"  br i1 %cond_{t}, label %loop_{t}, label %loop_exit_{t}\n"
+        f"loop_exit_{t}:\n"
+        f"  ret i32 %acc_{t}\n"
+    )
+
+    return text.replace(body, new_body + "\n" + loop_block)
+
+
+# ---------------------------------------------------------------------------
+# Strategy 8: Inline function call
+# ---------------------------------------------------------------------------
+
+def _strategy_func_call(text: str, rng: random.Random) -> str:
+    """
+    Introduce a small helper function and a call to it from @main.
+
+    The helper performs a simple arithmetic computation on the entry value.
+    O3 inlines it (eliminating the call frame); O0 keeps the full call
+    sequence — a reliable source of size differences.
+    """
+    # Only apply to single-function modules (avoid duplicate @helper names)
+    if text.count("define ") != 1:
+        return text
+
+    m = re.search(r"\nentry:\n([\s\S]*?)\n}\n?", text)
+    if not m:
+        return text
+    body  = m.group(1)
+    ret_m = re.search(r"\s+ret i32 (.+)", body)
+    if not ret_m:
+        return text
+
+    ret_val = ret_m.group(1).strip()
+    t       = rng.randint(1000, 9999)
+    k       = rng.randint(2, 9)
+
+    helper = (
+        f"\ndefine i32 @helper_{t}(i32 %x) {{\n"
+        f"  %h0 = mul i32 %x, {k}\n"
+        f"  %h1 = add i32 %h0, 1\n"
+        f"  ret i32 %h1\n"
+        f"}}\n"
+    )
+
+    new_ret = (
+        f"  %call_{t} = call i32 @helper_{t}(i32 {ret_val})\n"
+        f"  ret i32 %call_{t}"
+    )
+    new_body = re.sub(r"\s+ret i32 .+", f"\n{new_ret}", body)
+    new_text = text.replace(body, new_body)
+    # Prepend the helper before @main's define
+    return helper + new_text
+
+
+# ---------------------------------------------------------------------------
+# Strategy 9: Global variable mutation
+# ---------------------------------------------------------------------------
+
+def _strategy_global_var(text: str, rng: random.Random) -> str:
+    """
+    Prepend a global constant and load it into the entry block before use.
+
+    O3 constant-propagates the global away entirely; O0 emits an actual
+    load instruction, widening the binary-size gap.
+    """
+    # Only apply when no globals are already present
+    if "@g_" in text:
+        return text
+
+    m = re.search(r"\nentry:\n([\s\S]*?)\n}\n?", text)
+    if not m:
+        return text
+    body  = m.group(1)
+    ret_m = re.search(r"\s+ret i32 (.+)", body)
+    if not ret_m:
+        return text
+
+    ret_val = ret_m.group(1).strip()
+    t       = rng.randint(1000, 9999)
+    val     = rng.randint(1, 31)
+
+    global_decl = f"@g_{t} = constant i32 {val}\n"
+    load_line   = f"  %gval_{t} = load i32, i32* @g_{t}\n"
+    new_ret_val = f"%gsum_{t}"
+    sum_line    = f"  %gsum_{t} = add i32 {ret_val}, %gval_{t}\n"
+
+    new_body = re.sub(
+        r"\s+ret i32 .+",
+        f"\n{load_line}{sum_line}  ret i32 {new_ret_val}",
+        body,
+    )
+    return global_decl + text.replace(body, new_body)
+
+
+# ---------------------------------------------------------------------------
+# Strategy 10: Vector operation mutation
+# ---------------------------------------------------------------------------
+
+def _strategy_vector_ops(text: str, rng: random.Random) -> str:
+    """
+    Insert a side-computation using <4 x i32> SIMD vectors before the return.
+
+    The vector result feeds into the final return value via an extractelement,
+    so it is not dead code.  O3 can vectorize / constant-fold the whole
+    sequence; O0 emits the individual vector instructions verbatim.
+    """
+    m = re.search(r"\nentry:\n([\s\S]*?)\n}\n?", text)
+    if not m:
+        return text
+    body  = m.group(1)
+    if "vector" in body or "<4 x" in body:
+        return text
+    ret_m = re.search(r"\s+ret i32 (.+)", body)
+    if not ret_m:
+        return text
+
+    ret_val = ret_m.group(1).strip()
+    t       = rng.randint(1000, 9999)
+    a, b    = rng.randint(1, 7), rng.randint(1, 7)
+
+    vec_ops = (
+        f"  %va_{t} = insertelement <4 x i32> undef, i32 {a}, i32 0\n"
+        f"  %vb_{t} = insertelement <4 x i32> undef, i32 {b}, i32 0\n"
+        f"  %vc_{t} = add <4 x i32> %va_{t}, %vb_{t}\n"
+        f"  %vs_{t} = extractelement <4 x i32> %vc_{t}, i32 0\n"
+        f"  %vres_{t} = add i32 {ret_val}, %vs_{t}\n"
+    )
+    new_body = re.sub(
+        r"\s+ret i32 .+",
+        f"\n{vec_ops}  ret i32 %vres_{t}",
+        body,
+    )
+    return text.replace(body, new_body)
+
+
+# ---------------------------------------------------------------------------
 # Ordered strategy table
 # ---------------------------------------------------------------------------
 
 _STRATEGIES: List[Tuple[str, _Strategy]] = [
-    ("opcode_swap", _strategy_opcode_swap),
-    ("dead_code",   _strategy_insert_dead_code),
-    ("block_split", _strategy_block_split),
-    ("cond_phi",    _strategy_cond_phi),
-    ("deep_cfg",    _strategy_deep_cfg),
-    ("const_tweak", _strategy_const_tweak),
+    ("opcode_swap",  _strategy_opcode_swap),
+    ("dead_code",    _strategy_insert_dead_code),
+    ("block_split",  _strategy_block_split),
+    ("cond_phi",     _strategy_cond_phi),
+    ("deep_cfg",     _strategy_deep_cfg),
+    ("const_tweak",  _strategy_const_tweak),
+    ("loop_insert",  _strategy_loop_insert),
+    ("func_call",    _strategy_func_call),
+    ("global_var",   _strategy_global_var),
+    ("vector_ops",   _strategy_vector_ops),
 ]
 
 
@@ -251,6 +426,10 @@ def _mutate_text(text: str, rng: random.Random) -> tuple[str, list[str]]:
         "cond_phi":    weights.cond_phi,
         "deep_cfg":    weights.deep_cfg,
         "const_tweak": weights.const_tweak,
+        "loop_insert": getattr(weights, "loop_insert", 0.40),
+        "func_call":   getattr(weights, "func_call",   0.35),
+        "global_var":  getattr(weights, "global_var",  0.30),
+        "vector_ops":  getattr(weights, "vector_ops",  0.30),
     }
     max_applied = cfg.mutation.max_strategies_per_file
 

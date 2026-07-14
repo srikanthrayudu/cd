@@ -13,6 +13,10 @@ from src.mutator import (
     _strategy_block_split,
     _strategy_cond_phi,
     _strategy_const_tweak,
+    _strategy_loop_insert,
+    _strategy_func_call,
+    _strategy_global_var,
+    _strategy_vector_ops,
     _mutate_text,
     mutate_files,
 )
@@ -54,9 +58,7 @@ class TestInsertDeadCode:
     def test_does_nothing_without_entry_label(self):
         ir  = "define i32 @f() {\n  ret i32 0\n}\n"
         rng = random.Random(0)
-        # no "entry:" label — function returns unchanged
         out = _strategy_insert_dead_code(ir, rng)
-        # The original block structure is preserved
         assert "ret i32 0" in out
 
     def test_result_is_valid_structure(self):
@@ -84,7 +86,6 @@ class TestBlockSplit:
         )
         rng = random.Random(0)
         out = _strategy_block_split(ir, rng)
-        # should be unchanged — already has a branch
         assert out == ir
 
     def test_return_value_preserved(self):
@@ -109,14 +110,131 @@ class TestConstTweak:
     def test_changes_an_integer_literal(self):
         rng = random.Random(1)
         out = _strategy_const_tweak(_SIMPLE_IR, rng)
-        # original has "i32 1" and "i32 2" — one should be replaced
         assert out != _SIMPLE_IR
 
     def test_no_change_when_no_integer_found(self):
         ir  = "define i32 @main() {\nentry:\n  ret i32 %x\n}\n"
         rng = random.Random(0)
-        # no bare integer literal — unchanged
         assert _strategy_const_tweak(ir, rng) == ir
+
+
+# ---------------------------------------------------------------------------
+# New strategy tests
+# ---------------------------------------------------------------------------
+
+class TestLoopInsert:
+    def test_inserts_loop_header(self):
+        rng = random.Random(0)
+        out = _strategy_loop_insert(_SIMPLE_IR, rng)
+        assert "loop_" in out
+        assert "phi i32" in out
+
+    def test_loop_has_exit_block(self):
+        rng = random.Random(5)
+        out = _strategy_loop_insert(_SIMPLE_IR, rng)
+        assert "loop_exit_" in out
+
+    def test_skipped_when_cfg_already_has_branch(self):
+        ir = (
+            "define i32 @main() {\n"
+            "entry:\n"
+            "  br label %done\n"
+            "done:\n"
+            "  ret i32 0\n"
+            "}\n"
+        )
+        rng = random.Random(0)
+        out = _strategy_loop_insert(ir, rng)
+        assert out == ir  # untouched because CFG already has control flow
+
+    def test_result_ends_with_newline(self):
+        rng = random.Random(3)
+        out = _strategy_loop_insert(_SIMPLE_IR, rng)
+        assert out.endswith("\n")
+
+    def test_original_define_preserved(self):
+        rng = random.Random(7)
+        out = _strategy_loop_insert(_SIMPLE_IR, rng)
+        assert "define i32 @main" in out
+
+
+class TestFuncCall:
+    def test_inserts_helper_function(self):
+        rng = random.Random(0)
+        out = _strategy_func_call(_SIMPLE_IR, rng)
+        assert "@helper_" in out
+
+    def test_inserts_call_instruction(self):
+        rng = random.Random(0)
+        out = _strategy_func_call(_SIMPLE_IR, rng)
+        assert "call i32 @helper_" in out
+
+    def test_skipped_for_multi_function_modules(self):
+        ir = (
+            "define i32 @helper(i32 %x) {\n  ret i32 %x\n}\n"
+            "define i32 @main() {\nentry:\n  ret i32 0\n}\n"
+        )
+        rng = random.Random(0)
+        out = _strategy_func_call(ir, rng)
+        # Already has 2 defines — strategy should not add another
+        assert out == ir
+
+    def test_result_ends_with_newline(self):
+        rng = random.Random(2)
+        out = _strategy_func_call(_SIMPLE_IR, rng)
+        assert out.endswith("\n")
+
+
+class TestGlobalVar:
+    def test_inserts_global_declaration(self):
+        rng = random.Random(0)
+        out = _strategy_global_var(_SIMPLE_IR, rng)
+        assert "@g_" in out
+
+    def test_inserts_load_instruction(self):
+        rng = random.Random(0)
+        out = _strategy_global_var(_SIMPLE_IR, rng)
+        assert "load i32" in out
+
+    def test_skipped_when_global_already_present(self):
+        ir = "@g_1234 = constant i32 5\n" + _SIMPLE_IR
+        rng = random.Random(0)
+        out = _strategy_global_var(ir, rng)
+        # Already has a global — strategy should not add another
+        assert out == ir
+
+    def test_result_ends_with_newline(self):
+        rng = random.Random(9)
+        out = _strategy_global_var(_SIMPLE_IR, rng)
+        assert out.endswith("\n")
+
+
+class TestVectorOps:
+    def test_inserts_vector_operations(self):
+        rng = random.Random(0)
+        out = _strategy_vector_ops(_SIMPLE_IR, rng)
+        assert "<4 x i32>" in out
+
+    def test_inserts_insertelement(self):
+        rng = random.Random(0)
+        out = _strategy_vector_ops(_SIMPLE_IR, rng)
+        assert "insertelement" in out
+
+    def test_inserts_extractelement(self):
+        rng = random.Random(0)
+        out = _strategy_vector_ops(_SIMPLE_IR, rng)
+        assert "extractelement" in out
+
+    def test_skipped_when_vector_already_present(self):
+        ir = _SIMPLE_IR.replace("ret i32 %v0", "  %vx = add <4 x i32> undef, undef\n  ret i32 %v0")
+        rng = random.Random(0)
+        out = _strategy_vector_ops(ir, rng)
+        assert out == ir
+
+    def test_result_ends_with_newline(self):
+        rng = random.Random(4)
+        out = _strategy_vector_ops(_SIMPLE_IR, rng)
+        assert out.endswith("\n")
 
 
 class TestMutateText:
@@ -136,6 +254,21 @@ class TestMutateText:
         out, _ = _mutate_text(_SIMPLE_IR, rng)
         assert len(out) > 0
 
+    def test_strategy_names_are_strings(self):
+        rng = random.Random(42)
+        _, strategies = _mutate_text(_SIMPLE_IR, rng)
+        assert all(isinstance(s, str) for s in strategies)
+
+    def test_new_strategies_appear_in_strategy_list(self):
+        """Run many seeds and confirm new strategies are reachable."""
+        seen = set()
+        for seed in range(200):
+            _, strategies = _mutate_text(_SIMPLE_IR, random.Random(seed))
+            seen.update(strategies)
+        new = {"loop_insert", "func_call", "global_var", "vector_ops"}
+        # At least one new strategy should fire across 200 seeds
+        assert seen & new, f"None of the new strategies appeared in 200 runs; saw: {seen}"
+
 
 class TestMutateFiles:
     def test_creates_correct_number_of_files(self, tmp_path):
@@ -145,7 +278,7 @@ class TestMutateFiles:
         (src / "b.ll").write_text(_SIMPLE_IR)
         out = tmp_path / "output"
         created = mutate_files(src, out, per_file=2, seed=0)
-        assert len(created) == 4  # 2 files × 2 mutations each
+        assert len(created) == 4
 
     def test_output_files_have_mut_suffix(self, tmp_path):
         src = tmp_path / "input"
@@ -175,15 +308,13 @@ class TestMutateFiles:
         src = tmp_path / "input"
         src.mkdir()
         (src / "test_file.ll").write_text(_SIMPLE_IR)
-        out = tmp_path / "output"
+        out      = tmp_path / "output"
         log_file = tmp_path / "mutations.jsonl"
-        created = mutate_files(src, out, per_file=2, seed=0, mutation_log=log_file)
+        created  = mutate_files(src, out, per_file=2, seed=0, mutation_log=log_file)
         assert len(created) == 2
         assert log_file.exists()
         lines = log_file.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 2
-        
-        # Check layout of log entries
         entry1 = json.loads(lines[0])
         assert entry1["source"] == "test_file.ll"
         assert entry1["output"] == "test_file_mut0.ll"

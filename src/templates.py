@@ -405,23 +405,140 @@ entry:
 }}"""
 
 # ---------------------------------------------------------------------------
+# Multi-function call graph template
+# ---------------------------------------------------------------------------
+# Three small functions call each other in a chain; O3 inlines all of them
+# and constant-folds the result, while O0 preserves every call frame.
+
+CAT_CALL_GRAPH = "call_graph_inlining"
+
+MULTI_FUNC_CALL_GRAPH = """\
+define i32 @leaf_{id}(i32 %x) {{
+  %r0 = mul i32 %x, {c}
+  %r1 = add i32 %r0, 1
+  ret i32 %r1
+}}
+
+define i32 @mid_{id}(i32 %x) {{
+  %m0 = call i32 @leaf_{id}(i32 %x)
+  %m1 = add i32 %m0, {c}
+  ret i32 %m1
+}}
+
+define i32 @main() {{
+entry:
+  %a = call i32 @mid_{id}(i32 {id})
+  %b = call i32 @mid_{id}(i32 {c})
+  %result = add i32 %a, %b
+  ret i32 %result
+}}"""
+
+# ---------------------------------------------------------------------------
+# Memory alloca chain template
+# ---------------------------------------------------------------------------
+# Multiple alloca slots with store/load chains — mem2reg promotes these to
+# SSA registers under O1+, eliminating every memory operation.
+
+CAT_ALLOCA_CHAIN = "alloca_chain_promotion"
+
+MEMORY_ALLOCA_CHAIN = """\
+define i32 @main() {{
+entry:
+  %s0 = alloca i32
+  %s1 = alloca i32
+  %s2 = alloca i32
+  store i32 {id}, i32* %s0
+  store i32 {c},  i32* %s1
+  %v0 = load i32, i32* %s0
+  %v1 = load i32, i32* %s1
+  %t0 = add i32 %v0, %v1
+  store i32 %t0, i32* %s2
+  %v2 = load i32, i32* %s2
+  %t1 = mul i32 %v2, {c}
+  store i32 %t1, i32* %s0
+  %v3 = load i32, i32* %s0
+  %t2 = add i32 %v3, %v1
+  store i32 %t2, i32* %s1
+  %result = load i32, i32* %s1
+  ret i32 %result
+}}"""
+
+# ---------------------------------------------------------------------------
+# Global constant propagation template
+# ---------------------------------------------------------------------------
+# A module-level constant is read inside a function; O3 propagates the
+# constant value directly, removing the load and any address computation.
+
+CAT_GLOBAL_CONST = "global_constant_propagation"
+
+GLOBAL_CONST_PROPAGATION = """\
+@SCALE_{id} = constant i32 {c}
+@BIAS_{id}  = constant i32 {id}
+
+define i32 @main() {{
+entry:
+  %scale = load i32, i32* @SCALE_{id}
+  %bias  = load i32, i32* @BIAS_{id}
+  %a = mul i32 %scale, {id}
+  %b = add i32 %a, %bias
+  %c0 = mul i32 %b, %scale
+  %d = sub i32 %c0, %bias
+  ret i32 %d
+}}"""
+
+# ---------------------------------------------------------------------------
+# Loop with memory access template
+# ---------------------------------------------------------------------------
+# A loop that reads and writes a stack slot on every iteration; LICM can
+# hoist the load out of the loop, and mem2reg can eliminate the slot entirely.
+
+CAT_LOOP_MEMORY = "loop_memory_access"
+
+LOOP_MEMORY_ACCESS = """\
+define i32 @main() {{
+entry:
+  %slot = alloca i32
+  store i32 0, i32* %slot
+  br label %loop
+
+loop:
+  %i = phi i32 [ 0, %entry ], [ %i_next, %loop ]
+  %cur = load i32, i32* %slot
+  %inv = mul i32 {c}, {id}
+  %upd = add i32 %cur, %inv
+  store i32 %upd, i32* %slot
+  %i_next = add i32 %i, 1
+  %cond = icmp slt i32 %i_next, 8
+  br i1 %cond, label %loop, label %exit
+
+exit:
+  %result = load i32, i32* %slot
+  ret i32 %result
+}}"""
+
+# ---------------------------------------------------------------------------
 # Template library — the single collection every other module references
 # ---------------------------------------------------------------------------
 
 TEMPLATE_LIBRARY: List[dict] = [
-    {"name": "const_fold_chain",    "template": CONST_FOLD_CHAIN,    "category": CAT_CONSTANT_FOLDING},
-    {"name": "const_fold_mixed",    "template": CONST_FOLD_MIXED,    "category": CAT_CONSTANT_FOLDING},
-    {"name": "dead_code_chain",     "template": DEAD_CODE_CHAIN,     "category": CAT_DEAD_CODE},
-    {"name": "dead_code_mixed",     "template": DEAD_CODE_MIXED,     "category": CAT_DEAD_CODE},
-    {"name": "redundant_chain",     "template": REDUNDANT_CHAIN,     "category": CAT_CSE},
-    {"name": "loop_collapsible",    "template": LOOP_COLLAPSIBLE,    "category": CAT_LOOP},
-    {"name": "loop_invariant",      "template": LOOP_WITH_INVARIANT, "category": CAT_LOOP},
-    {"name": "branch_fanout",       "template": BRANCH_FANOUT,       "category": CAT_BRANCH},
-    {"name": "multi_way_branch",    "template": MULTI_WAY_BRANCH,    "category": CAT_BRANCH},
-    {"name": "switch_lowering",     "template": SWITCH_LOWERING,     "category": CAT_SWITCH},
-    {"name": "vector_pattern",      "template": VECTOR_PATTERN,      "category": CAT_VECTOR},
-    {"name": "array_promote",       "template": ARRAY_PROMOTE,       "category": CAT_INLINE},
-    {"name": "tail_call_accum",     "template": TAIL_CALL_ACCUM,     "category": CAT_TAIL_CALL},
-    {"name": "gvn_pattern",         "template": GVN_PATTERN,         "category": CAT_GVN},
-    {"name": "mem2reg_pattern",     "template": MEM2REG_PATTERN,     "category": CAT_MEM2REG},
+    {"name": "const_fold_chain",        "template": CONST_FOLD_CHAIN,        "category": CAT_CONSTANT_FOLDING},
+    {"name": "const_fold_mixed",        "template": CONST_FOLD_MIXED,        "category": CAT_CONSTANT_FOLDING},
+    {"name": "dead_code_chain",         "template": DEAD_CODE_CHAIN,         "category": CAT_DEAD_CODE},
+    {"name": "dead_code_mixed",         "template": DEAD_CODE_MIXED,         "category": CAT_DEAD_CODE},
+    {"name": "redundant_chain",         "template": REDUNDANT_CHAIN,         "category": CAT_CSE},
+    {"name": "loop_collapsible",        "template": LOOP_COLLAPSIBLE,        "category": CAT_LOOP},
+    {"name": "loop_invariant",          "template": LOOP_WITH_INVARIANT,     "category": CAT_LOOP},
+    {"name": "branch_fanout",           "template": BRANCH_FANOUT,           "category": CAT_BRANCH},
+    {"name": "multi_way_branch",        "template": MULTI_WAY_BRANCH,        "category": CAT_BRANCH},
+    {"name": "switch_lowering",         "template": SWITCH_LOWERING,         "category": CAT_SWITCH},
+    {"name": "vector_pattern",          "template": VECTOR_PATTERN,          "category": CAT_VECTOR},
+    {"name": "array_promote",           "template": ARRAY_PROMOTE,           "category": CAT_INLINE},
+    {"name": "tail_call_accum",         "template": TAIL_CALL_ACCUM,         "category": CAT_TAIL_CALL},
+    {"name": "gvn_pattern",             "template": GVN_PATTERN,             "category": CAT_GVN},
+    {"name": "mem2reg_pattern",         "template": MEM2REG_PATTERN,         "category": CAT_MEM2REG},
+    # Richer templates: multi-function, memory operations, global constants
+    {"name": "multi_func_call_graph",    "template": MULTI_FUNC_CALL_GRAPH,   "category": CAT_CALL_GRAPH},
+    {"name": "memory_alloca_chain",      "template": MEMORY_ALLOCA_CHAIN,     "category": CAT_ALLOCA_CHAIN},
+    {"name": "global_const_propagation", "template": GLOBAL_CONST_PROPAGATION,"category": CAT_GLOBAL_CONST},
+    {"name": "loop_memory_access",       "template": LOOP_MEMORY_ACCESS,      "category": CAT_LOOP_MEMORY},
 ]

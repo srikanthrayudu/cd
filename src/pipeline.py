@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -176,6 +176,90 @@ def _print_summary_table(counts: Dict[str, int], metrics_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Module-level worker (must be top-level for ProcessPoolExecutor pickling)
+# ---------------------------------------------------------------------------
+
+def _process_file_worker(
+    args: Tuple,
+) -> Tuple[List[dict], List[dict], List[dict], List[Tuple[Path, str]]]:
+    """
+    Process a single IR file: execute at both opt levels, emit and diff the
+    textual IR (with instruction counts), and collect all log content.
+
+    Parameters are passed as a single tuple so the function is compatible with
+    ``ProcessPoolExecutor.submit``.
+
+    Returns four lists:
+      exec_recs  — execution records for executions.jsonl
+      diff_recs  — behavioural diff records for diffs.jsonl
+      skip_recs  — skipped records for skipped_exec.jsonl
+      logs       — (path, content) pairs for per-file log files
+    """
+    ir_file, lvl_base, lvl_opt, optimized_dir, diffs_dir, logs_dir = args
+
+    stem      = ir_file.stem
+    exec_recs: List[dict]             = []
+    diff_recs: List[dict]             = []
+    skip_recs: List[dict]             = []
+    logs:      List[Tuple[Path, str]] = []
+
+    res_lli  = run_lli(ir_file)
+    res_base = run_clang(ir_file, lvl_base)
+    res_opt  = run_clang(ir_file, lvl_opt)
+
+    ok_base, ir_base, err_base = emit_optimized_ir(ir_file, lvl_base)
+    ok_opt,  ir_opt,  err_opt  = emit_optimized_ir(ir_file, lvl_opt)
+
+    if ok_base:
+        (optimized_dir / f"{stem}.{lvl_base}.ll").write_text(ir_base, encoding="utf-8")
+    if ok_opt:
+        (optimized_dir / f"{stem}.{lvl_opt}.ll").write_text(ir_opt, encoding="utf-8")
+
+    if ok_base and ok_opt:
+        code_diff  = compare_optimized_ir(stem, ir_base, ir_opt)
+        diff_text  = code_diff.unified_diff or "# no textual diff\n"
+        instr_meta = {
+            "o0_instr_count":      code_diff.o0_instr_count,
+            "o3_instr_count":      code_diff.o3_instr_count,
+            "instr_delta":         code_diff.instr_delta,
+            "instr_reduction_pct": code_diff.instr_reduction_pct,
+        }
+    else:
+        diff_text  = (
+            f"# optimised IR unavailable\n"
+            f"# {lvl_base}: ok={ok_base} err={err_base!r}\n"
+            f"# {lvl_opt}:  ok={ok_opt}  err={err_opt!r}\n"
+        )
+        instr_meta = {}
+
+    (diffs_dir / f"{stem}.diff").write_text(diff_text, encoding="utf-8")
+
+    if not res_lli.skipped:
+        logs.append((logs_dir / f"{stem}.lli.out", res_lli.stdout))
+        logs.append((logs_dir / f"{stem}.lli.err", res_lli.stderr))
+
+    if res_base.skipped or res_opt.skipped:
+        skip_recs.append({"name": stem, "reason": "tool_missing"})
+        return exec_recs, diff_recs, skip_recs, logs
+
+    base_rec = {**asdict(res_base), **instr_meta}
+    exec_recs.append(asdict(res_lli))
+    exec_recs.append(base_rec)
+    exec_recs.append(asdict(res_opt))
+
+    logs.append((logs_dir / f"{stem}.{lvl_base}.out", res_base.stdout))
+    logs.append((logs_dir / f"{stem}.{lvl_base}.err", res_base.stderr))
+    logs.append((logs_dir / f"{stem}.{lvl_opt}.out",  res_opt.stdout))
+    logs.append((logs_dir / f"{stem}.{lvl_opt}.err",  res_opt.stderr))
+
+    beh_diff = compare_results(stem, res_base, res_opt)
+    if not beh_diff.match:
+        diff_recs.append(asdict(beh_diff))
+
+    return exec_recs, diff_recs, skip_recs, logs
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -237,17 +321,22 @@ def run_pipeline(
               flush=True)
 
         print("[2/5] Mutating IR files ...", flush=True)
+        mutation_log_path = paths.results_dir / "mutation_log.jsonl"
+        if mutation_log_path.exists():
+            mutation_log_path.unlink()
         mutated = mutate_files(
             paths.dataset_dir,
             paths.mutated_dir,
-            per_file = mut_per_file,
-            seed     = mut_seed,
+            per_file     = mut_per_file,
+            seed         = mut_seed,
+            mutation_log = mutation_log_path,
         )
         mutated += mutate_files(
             paths.generated_dir,
             paths.mutated_dir,
-            per_file = cfg.mutation.per_generated_file,
-            seed     = mut_seed,
+            per_file     = cfg.mutation.per_generated_file,
+            seed         = mut_seed,
+            mutation_log = mutation_log_path,
         )
         print(f"       → {len(mutated)} mutated variants", flush=True)
 
@@ -268,9 +357,10 @@ def run_pipeline(
             raise FileNotFoundError(f"Test file not found: {test_file}")
         dest = paths.valid_dir / Path(test_file).name
         dest.write_text(Path(test_file).read_text(encoding="utf-8"), encoding="utf-8")
-        generated = []
-        mutated   = []
-        counts    = {"generated": 0, "mutated": 0, "valid": 1, "invalid": 0}
+        generated         = []
+        mutated           = []
+        mutation_log_path = None
+        counts            = {"generated": 0, "mutated": 0, "valid": 1, "invalid": 0}
 
     _write_run_manifest(
         manifest_path,
@@ -302,72 +392,21 @@ def run_pipeline(
     ir_files = sorted(paths.valid_dir.glob("*.ll"))
     workers  = min(os.cpu_count() or 4, len(ir_files) or 1)
     print(f"[4/5] Executing {len(ir_files)} IR files  "
-          f"(-{lvl_base} vs -{lvl_opt}, {workers} threads) ...", flush=True)
+          f"(-{lvl_base} vs -{lvl_opt}, {workers} processes) ...", flush=True)
 
-    def _process_one(ir_file: Path) -> Tuple[
-        List[dict],   # exec records to append
-        List[dict],   # diff records to append
-        List[dict],   # skipped records to append
-        List[Tuple[Path, str]],  # log files to write
-    ]:
-        stem     = ir_file.stem
-        exec_recs: List[dict] = []
-        diff_recs: List[dict] = []
-        skip_recs: List[dict] = []
-        logs:      List[Tuple[Path, str]] = []
+    # Build a list of argument tuples for the module-level worker
+    work_items = [
+        (ir_file, lvl_base, lvl_opt, paths.optimized_dir, paths.diffs_dir, paths.logs_dir)
+        for ir_file in ir_files
+    ]
 
-        res_lli  = run_lli(ir_file)
-        res_base = run_clang(ir_file, lvl_base)
-        res_opt  = run_clang(ir_file, lvl_opt)
-
-        ok_base, ir_base, err_base = emit_optimized_ir(ir_file, lvl_base)
-        ok_opt,  ir_opt,  err_opt  = emit_optimized_ir(ir_file, lvl_opt)
-
-        if ok_base:
-            (paths.optimized_dir / f"{stem}.{lvl_base}.ll").write_text(ir_base, encoding="utf-8")
-        if ok_opt:
-            (paths.optimized_dir / f"{stem}.{lvl_opt}.ll").write_text(ir_opt, encoding="utf-8")
-
-        diff_text = (
-            compare_optimized_ir(stem, ir_base, ir_opt).unified_diff or "# no textual diff\n"
-        ) if ok_base and ok_opt else (
-            f"# optimised IR unavailable\n"
-            f"# {lvl_base}: ok={ok_base} err={err_base!r}\n"
-            f"# {lvl_opt}:  ok={ok_opt}  err={err_opt!r}\n"
-        )
-        (paths.diffs_dir / f"{stem}.diff").write_text(diff_text, encoding="utf-8")
-
-        if not res_lli.skipped:
-            logs.append((paths.logs_dir / f"{stem}.lli.out", res_lli.stdout))
-            logs.append((paths.logs_dir / f"{stem}.lli.err", res_lli.stderr))
-
-        if res_base.skipped or res_opt.skipped:
-            skip_recs.append({"name": stem, "reason": "tool_missing"})
-            return exec_recs, diff_recs, skip_recs, logs
-
-        exec_recs.append(asdict(res_lli))
-        exec_recs.append(asdict(res_base))
-        exec_recs.append(asdict(res_opt))
-
-        logs.append((paths.logs_dir / f"{stem}.{lvl_base}.out", res_base.stdout))
-        logs.append((paths.logs_dir / f"{stem}.{lvl_base}.err", res_base.stderr))
-        logs.append((paths.logs_dir / f"{stem}.{lvl_opt}.out",  res_opt.stdout))
-        logs.append((paths.logs_dir / f"{stem}.{lvl_opt}.err",  res_opt.stderr))
-
-        beh_diff = compare_results(stem, res_base, res_opt)
-        if not beh_diff.match:
-            diff_recs.append(asdict(beh_diff))
-
-        return exec_recs, diff_recs, skip_recs, logs
-
-    # Run all files in parallel; write results under a lock to avoid races
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_process_one, f): f for f in ir_files}
+    # Run all files in parallel; write results under sequential I/O to avoid races
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_process_file_worker, item): item for item in work_items}
         with _tqdm(total=len(ir_files), desc="Executing", unit="file") as bar:
             for fut in as_completed(futures):
                 exec_recs, diff_recs, skip_recs, logs = fut.result()
 
-                # Sequential I/O (fast; avoids file-handle races)
                 with executions_path.open("a", encoding="utf-8") as fh:
                     for rec in exec_recs:
                         fh.write(json.dumps(rec) + "\n")
@@ -387,7 +426,7 @@ def run_pipeline(
     # ── Step 3: Metrics + reports ──────────────────────────────────────────
     print("[5/5] Computing metrics and writing reports ...", flush=True)
     metrics_json_path = paths.evaluation_dir / file_names["metrics_json"]
-    metrics = compute_metrics(paths.results_dir, counts)
+    metrics = compute_metrics(paths.results_dir, counts, mutation_log=mutation_log_path)
     write_metrics(metrics, metrics_json_path)
     write_csv(metrics,     paths.evaluation_dir / file_names["metrics_csv"])
     write_bar_chart(metrics, paths.evaluation_dir / file_names["metrics_png"])

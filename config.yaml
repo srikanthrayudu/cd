@@ -65,6 +65,10 @@ mutation:
     cond_phi:          0.35   # insert a trivial conditional + phi
     deep_cfg:          0.75   # insert a multi-level CFG diamond
     const_tweak:       0.55   # replace one integer literal
+    loop_insert:       0.40   # wrap return value in a counted accumulator loop
+    func_call:         0.35   # introduce a small helper function + call site
+    global_var:        0.30   # prepend a global constant and load it at entry
+    vector_ops:        0.30   # insert <4 x i32> SIMD vector computation
   # Maximum number of mutation strategies applied per file
   max_strategies_per_file: 3
 
@@ -160,15 +164,23 @@ templates:
     - switch_lowering
     - loop_invariant
     - vector_pattern
+    - multi_func_call_graph
+    - memory_alloca_chain
+    - global_const_propagation
+    - loop_memory_access
   # Per-template selection weights (higher = more likely to be chosen)
   weights:
-    dead_code_elimination: 8
-    branch_fanout:         7
-    multi_way_branch:      6
-    switch_lowering:       5
-    loop_invariant:        4
-    vector_pattern:        3
-    array_promote:         3
+    dead_code_elimination:    8
+    branch_fanout:            7
+    multi_way_branch:         6
+    switch_lowering:          5
+    loop_invariant:           4
+    vector_pattern:           3
+    array_promote:            3
+    multi_func_call_graph:    5
+    memory_alloca_chain:      5
+    global_const_propagation: 4
+    loop_memory_access:       4
   # Size-padding decorator: chain length range added after ret
   decorator:
     chain_min:    6

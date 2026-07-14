@@ -57,9 +57,82 @@ class TestComputeMetrics:
         assert m.compile_failed == 1
 
     def test_missing_files_dont_crash(self, tmp_path):
-        # No JSONL files at all — should return zeros without raising
         m = compute_metrics(tmp_path, _base_counts())
         assert m.executed_total == 0
+
+    def test_diffs_count_from_jsonl(self, tmp_path):
+        (tmp_path / "executions.jsonl").write_text("")
+        _write_jsonl(tmp_path / "diffs.jsonl", [
+            {"name": "f1_mut0", "match": False, "reason": "exit_code_mismatch"},
+            {"name": "f2_mut0", "match": False, "reason": "stdout_mismatch"},
+        ])
+        (tmp_path / "skipped_exec.jsonl").write_text("")
+        m = compute_metrics(tmp_path, _base_counts())
+        assert m.diffs == 2
+
+
+class TestStrategyMetrics:
+    """Per-strategy apply counts and diff-rate tracking."""
+
+    def _setup_dirs(self, tmp_path):
+        for name in ("executions.jsonl", "skipped_exec.jsonl"):
+            (tmp_path / name).write_text("")
+        return tmp_path
+
+    def test_strategy_apply_counts_populated(self, tmp_path):
+        self._setup_dirs(tmp_path)
+        (tmp_path / "diffs.jsonl").write_text("")
+        log = tmp_path / "mutation_log.jsonl"
+        _write_jsonl(log, [
+            {"source": "a.ll", "output": "a_mut0.ll", "strategies": ["opcode_swap", "dead_code"]},
+            {"source": "a.ll", "output": "a_mut1.ll", "strategies": ["opcode_swap"]},
+        ])
+        m = compute_metrics(tmp_path, _base_counts(), mutation_log=log)
+        assert m.strategy_apply_counts["opcode_swap"] == 2
+        assert m.strategy_apply_counts["dead_code"]   == 1
+
+    def test_strategy_diff_counts_populated_when_diff_present(self, tmp_path):
+        self._setup_dirs(tmp_path)
+        # a_mut0 had a diff; a_mut1 did not
+        _write_jsonl(tmp_path / "diffs.jsonl", [
+            {"name": "a_mut0", "match": False, "reason": "exit_code_mismatch"},
+        ])
+        log = tmp_path / "mutation_log.jsonl"
+        _write_jsonl(log, [
+            {"source": "a.ll", "output": "a_mut0.ll", "strategies": ["opcode_swap"]},
+            {"source": "a.ll", "output": "a_mut1.ll", "strategies": ["opcode_swap"]},
+        ])
+        m = compute_metrics(tmp_path, _base_counts(), mutation_log=log)
+        assert m.strategy_diff_counts.get("opcode_swap", 0) == 1
+
+    def test_strategy_diff_rates_computed(self, tmp_path):
+        self._setup_dirs(tmp_path)
+        _write_jsonl(tmp_path / "diffs.jsonl", [
+            {"name": "a_mut0", "match": False, "reason": "exit_code_mismatch"},
+        ])
+        log = tmp_path / "mutation_log.jsonl"
+        _write_jsonl(log, [
+            {"source": "a.ll", "output": "a_mut0.ll", "strategies": ["deep_cfg"]},
+            {"source": "a.ll", "output": "a_mut1.ll", "strategies": ["deep_cfg"]},
+        ])
+        m = compute_metrics(tmp_path, _base_counts(), mutation_log=log)
+        # 1 diff out of 2 applications → 50 %
+        assert abs(m.strategy_diff_rates.get("deep_cfg", -1) - 50.0) < 0.1
+
+    def test_no_mutation_log_gives_empty_dicts(self, tmp_path):
+        self._setup_dirs(tmp_path)
+        (tmp_path / "diffs.jsonl").write_text("")
+        m = compute_metrics(tmp_path, _base_counts(), mutation_log=None)
+        assert m.strategy_apply_counts == {}
+        assert m.strategy_diff_counts  == {}
+        assert m.strategy_diff_rates   == {}
+
+    def test_missing_mutation_log_gives_empty_dicts(self, tmp_path):
+        self._setup_dirs(tmp_path)
+        (tmp_path / "diffs.jsonl").write_text("")
+        m = compute_metrics(tmp_path, _base_counts(),
+                            mutation_log=tmp_path / "nonexistent.jsonl")
+        assert m.strategy_apply_counts == {}
 
 
 class TestWriteMetrics:
@@ -77,6 +150,23 @@ class TestWriteMetrics:
         assert data["generated"] == 1
         assert data["binary_reduction_pct"] == 50.0
 
+    def test_strategy_dicts_serialized(self, tmp_path):
+        m = Metrics(
+            generated=1, mutated=1, valid=1, invalid=0,
+            executed_total=0, executed_lli=0, executed_clang=0,
+            compile_failed=0, timeouts=0, diffs=0, skipped_exec=0,
+            total_o0_size=0, total_o3_size=0,
+            paired_binary_cases=0, binary_savings=0, binary_reduction_pct=0.0,
+            strategy_apply_counts={"opcode_swap": 3},
+            strategy_diff_counts={"opcode_swap": 1},
+            strategy_diff_rates={"opcode_swap": 33.33},
+        )
+        out = tmp_path / "metrics.json"
+        write_metrics(m, out)
+        data = json.loads(out.read_text())
+        assert data["strategy_apply_counts"]["opcode_swap"] == 3
+        assert data["strategy_diff_rates"]["opcode_swap"] == 33.33
+
     def test_write_csv_has_header_and_row(self, tmp_path):
         m = Metrics(
             generated=2, mutated=2, valid=2, invalid=0,
@@ -88,6 +178,22 @@ class TestWriteMetrics:
         out = tmp_path / "metrics.csv"
         write_csv(m, out)
         lines = out.read_text().splitlines()
-        assert len(lines) == 2          # header + one data row
-        assert "generated" in lines[0]  # header contains field name
-        assert "2" in lines[1]          # data row contains value
+        assert len(lines) == 2
+        assert "generated" in lines[0]
+        assert "2" in lines[1]
+
+    def test_write_csv_omits_dict_fields(self, tmp_path):
+        m = Metrics(
+            generated=1, mutated=1, valid=1, invalid=0,
+            executed_total=0, executed_lli=0, executed_clang=0,
+            compile_failed=0, timeouts=0, diffs=0, skipped_exec=0,
+            total_o0_size=0, total_o3_size=0,
+            paired_binary_cases=0, binary_savings=0, binary_reduction_pct=0.0,
+            strategy_apply_counts={"opcode_swap": 1},
+        )
+        out = tmp_path / "metrics.csv"
+        write_csv(m, out)
+        header = out.read_text().splitlines()[0]
+        # Dict fields must not appear in the flat CSV header
+        assert "strategy_apply_counts" not in header
+        assert "strategy_diff_counts"  not in header

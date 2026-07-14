@@ -45,6 +45,18 @@ class Metrics:
     paired_binary_cases: int
     binary_savings:      int
     binary_reduction_pct: float
+    # Per-strategy statistics
+    strategy_apply_counts: Dict[str, int]    = None   # type: ignore[assignment]
+    strategy_diff_counts:  Dict[str, int]    = None   # type: ignore[assignment]
+    strategy_diff_rates:   Dict[str, float]  = None   # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.strategy_apply_counts is None:
+            self.strategy_apply_counts = {}
+        if self.strategy_diff_counts is None:
+            self.strategy_diff_counts = {}
+        if self.strategy_diff_rates is None:
+            self.strategy_diff_rates = {}
 
 
 # ---------------------------------------------------------------------------
@@ -78,21 +90,29 @@ def _count_nonempty_lines(path: Path) -> int:
 # Metric computation
 # ---------------------------------------------------------------------------
 
-def compute_metrics(results_dir: Path, counts: Dict[str, int]) -> Metrics:
+def compute_metrics(
+    results_dir: Path,
+    counts: Dict[str, int],
+    mutation_log: Optional[Path] = None,
+) -> "Metrics":
     """
     Aggregate execution logs and binary-size data from *results_dir* into a
     :class:`Metrics` instance.
 
     Parameters
     ----------
-    results_dir: directory containing ``executions.jsonl``, ``diffs.jsonl``,
-                 and ``skipped_exec.jsonl``
-    counts:      ``{"generated": N, "mutated": N, "valid": N, "invalid": N}``
-                 from the generation/validation stage
+    results_dir:   directory containing ``executions.jsonl``, ``diffs.jsonl``,
+                   and ``skipped_exec.jsonl``
+    counts:        ``{"generated": N, "mutated": N, "valid": N, "invalid": N}``
+                   from the generation/validation stage
+    mutation_log:  optional path to the JSONL mutation audit log produced by
+                   ``mutate_files``.  When supplied, per-strategy apply counts
+                   and diff rates are computed.
     """
     file_names  = cfg.reporting.files
     exec_rows   = _load_jsonl(results_dir / file_names["executions"])
-    diffs_count = _count_nonempty_lines(results_dir / file_names["diffs"])
+    diff_rows   = _load_jsonl(results_dir / file_names["diffs"])
+    diffs_count = len(diff_rows)
     skip_count  = _count_nonempty_lines(results_dir / file_names["skipped"])
 
     executed_lli = sum(
@@ -126,23 +146,53 @@ def compute_metrics(results_dir: Path, counts: Dict[str, int]) -> Metrics:
         (binary_savings / paired_o0_total * 100) if paired_o0_total else 0.0
     )
 
+    # ── Per-strategy statistics ────────────────────────────────────────────
+    strategy_apply_counts: Dict[str, int]   = {}
+    strategy_diff_counts:  Dict[str, int]   = {}
+    strategy_diff_rates:   Dict[str, float] = {}
+
+    if mutation_log is not None and mutation_log.exists():
+        mut_rows = _load_jsonl(mutation_log)
+
+        # Build a set of file stems that produced a diff
+        diff_stems = {str(row.get("name", "")) for row in diff_rows}
+
+        for entry in mut_rows:
+            output_stem = Path(str(entry.get("output", ""))).stem
+            strategies  = entry.get("strategies", [])
+            had_diff    = output_stem in diff_stems
+
+            for s in strategies:
+                strategy_apply_counts[s] = strategy_apply_counts.get(s, 0) + 1
+                if had_diff:
+                    strategy_diff_counts[s] = strategy_diff_counts.get(s, 0) + 1
+
+        for s, applied in strategy_apply_counts.items():
+            diffs_for_s = strategy_diff_counts.get(s, 0)
+            strategy_diff_rates[s] = (
+                round(diffs_for_s / applied * 100, 2) if applied else 0.0
+            )
+
     return Metrics(
-        generated           = counts.get("generated", 0),
-        mutated             = counts.get("mutated", 0),
-        valid               = counts.get("valid", 0),
-        invalid             = counts.get("invalid", 0),
-        executed_total      = len(exec_rows),
-        executed_lli        = executed_lli,
-        executed_clang      = executed_clang,
-        compile_failed      = compile_failed,
-        timeouts            = timeouts,
-        diffs               = diffs_count,
-        skipped_exec        = skip_count,
-        total_o0_size       = sum(o0_sizes.values()),
-        total_o3_size       = sum(o3_sizes.values()),
-        paired_binary_cases = paired_binary_cases,
-        binary_savings      = binary_savings,
-        binary_reduction_pct= binary_reduction_pct,
+        generated            = counts.get("generated", 0),
+        mutated              = counts.get("mutated", 0),
+        valid                = counts.get("valid", 0),
+        invalid              = counts.get("invalid", 0),
+        executed_total       = len(exec_rows),
+        executed_lli         = executed_lli,
+        executed_clang       = executed_clang,
+        compile_failed       = compile_failed,
+        timeouts             = timeouts,
+        diffs                = diffs_count,
+        skipped_exec         = skip_count,
+        total_o0_size        = sum(o0_sizes.values()),
+        total_o3_size        = sum(o3_sizes.values()),
+        paired_binary_cases  = paired_binary_cases,
+        binary_savings       = binary_savings,
+        binary_reduction_pct = binary_reduction_pct,
+        strategy_apply_counts = strategy_apply_counts,
+        strategy_diff_counts  = strategy_diff_counts,
+        strategy_diff_rates   = strategy_diff_rates,
     )
 
 
@@ -150,17 +200,31 @@ def compute_metrics(results_dir: Path, counts: Dict[str, int]) -> Metrics:
 # Persistence helpers
 # ---------------------------------------------------------------------------
 
-def write_metrics(metrics: Metrics, output_path: Path) -> None:
+def write_metrics(metrics: "Metrics", output_path: Path) -> None:
     """Write *metrics* as a pretty-printed JSON file."""
-    output_path.write_text(json.dumps(metrics.__dict__, indent=2), encoding="utf-8")
+    data = {
+        k: v
+        for k, v in metrics.__dict__.items()
+        if v is not None
+    }
+    output_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def write_csv(metrics: Metrics, output_path: Path) -> None:
-    """Write *metrics* as a single-row CSV with a header."""
-    headers = ",".join(metrics.__dict__.keys())
+def write_csv(metrics: "Metrics", output_path: Path) -> None:
+    """Write scalar *metrics* fields as a single-row CSV with a header.
+
+    Dict fields (strategy_apply_counts, strategy_diff_counts,
+    strategy_diff_rates) are omitted because they cannot be represented as
+    a flat single-row CSV.
+    """
+    scalar_items = [
+        (k, v) for k, v in metrics.__dict__.items()
+        if not isinstance(v, dict) and v is not None
+    ]
+    headers = ",".join(k for k, _ in scalar_items)
     values  = ",".join(
         f"{v:.4f}" if isinstance(v, float) else str(v)
-        for v in metrics.__dict__.values()
+        for _, v in scalar_items
     )
     output_path.write_text(f"{headers}\n{values}\n", encoding="utf-8")
 
