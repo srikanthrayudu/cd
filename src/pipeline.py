@@ -122,6 +122,24 @@ def _write_run_manifest(
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
+def _prune_feedback_seeds(seeds_dir: Path, keep: int = 50) -> int:
+    """
+    Keep only the *keep* most recently modified seed files in *seeds_dir*,
+    deleting older ones.  Returns the number of files deleted.
+
+    This prevents unbounded growth when many runs each add new seeds.
+    The threshold is generous — 50 seeds cover many mutation runs — but
+    configurable by the caller.
+    """
+    if not seeds_dir.exists():
+        return 0
+    seeds = sorted(seeds_dir.glob("*.ll"), key=lambda p: p.stat().st_mtime, reverse=True)
+    to_delete = seeds[keep:]
+    for p in to_delete:
+        p.unlink(missing_ok=True)
+    return len(to_delete)
+
+
 def _append_run_history(history_path: Path, metrics: object, counts: Dict[str, int]) -> None:
     """
     Append a compact single-line JSON record to *history_path* (JSONL).
@@ -408,7 +426,7 @@ def run_pipeline(
             mutation_log = mutation_log_path,
         )
         # Feedback loop: re-mutate files that produced diffs in a previous run
-        feedback_seeds_dir = root / "feedback_seeds"
+        feedback_seeds_dir = paths.feedback_seeds_dir
         if feedback_seeds_dir.exists() and any(feedback_seeds_dir.glob("*.ll")):
             n_feedback = len(list(feedback_seeds_dir.glob("*.ll")))
             print(f"       → replaying {n_feedback} feedback seeds ...", flush=True)
@@ -523,10 +541,14 @@ def run_pipeline(
     write_triage(triage, paths.results_dir / file_names["triage"])
 
     # ── Feedback loop: seed next run with diff-producing files ─────────────
-    seeds_dir  = root / "feedback_seeds"
+    seeds_dir  = paths.feedback_seeds_dir
     n_seeds    = _collect_diff_seeds(diffs_path, paths.valid_dir, seeds_dir)
     if n_seeds:
         print(f"       → {n_seeds} diff-producing files saved to "
               f"{seeds_dir.relative_to(root)} for next-run seeding", flush=True)
+    pruned = _prune_feedback_seeds(seeds_dir)
+    if pruned:
+        print(f"       → {pruned} old feedback seeds pruned (keeping 50 most recent)",
+              flush=True)
 
     _print_summary_table(counts, metrics_json_path)

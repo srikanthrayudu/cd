@@ -58,29 +58,31 @@ RAW: dict = _load_raw()
 @dataclass(frozen=True)
 class PathConfig:
     dataset:    str
-    generated:  str
-    mutated:    str
-    valid:      str
-    invalid:    str
-    logs:       str
-    results:    str
-    evaluation: str
-    optimized:  str
-    diffs:      str
+    generated:       str
+    mutated:         str
+    valid:           str
+    invalid:         str
+    logs:            str
+    results:         str
+    evaluation:      str
+    optimized:       str
+    diffs:           str
+    feedback_seeds:  str
 
     @staticmethod
     def from_dict(d: dict) -> "PathConfig":
         return PathConfig(
-            dataset    = d["dataset"],
-            generated  = d["generated"],
-            mutated    = d["mutated"],
-            valid      = d["valid"],
-            invalid    = d["invalid"],
-            logs       = d["logs"],
-            results    = d["results"],
-            evaluation = d["evaluation"],
-            optimized  = d["optimized"],
-            diffs      = d["diffs"],
+            dataset         = d["dataset"],
+            generated       = d["generated"],
+            mutated         = d["mutated"],
+            valid           = d["valid"],
+            invalid         = d["invalid"],
+            logs            = d["logs"],
+            results         = d["results"],
+            evaluation      = d["evaluation"],
+            optimized       = d["optimized"],
+            diffs           = d["diffs"],
+            feedback_seeds  = d.get("feedback_seeds", "feedback_seeds"),
         )
 
 
@@ -322,33 +324,35 @@ cfg: Config = Config.from_dict(RAW)
 
 @dataclass(frozen=True)
 class ProjectPaths:
-    root:           Path
-    dataset_dir:    Path
-    generated_dir:  Path
-    mutated_dir:    Path
-    valid_dir:      Path
-    invalid_dir:    Path
-    logs_dir:       Path
-    results_dir:    Path
-    evaluation_dir: Path
-    optimized_dir:  Path
-    diffs_dir:      Path
+    root:                Path
+    dataset_dir:         Path
+    generated_dir:       Path
+    mutated_dir:         Path
+    valid_dir:           Path
+    invalid_dir:         Path
+    logs_dir:            Path
+    results_dir:         Path
+    evaluation_dir:      Path
+    optimized_dir:       Path
+    diffs_dir:           Path
+    feedback_seeds_dir:  Path
 
     @staticmethod
     def from_config(config: Config, root: Path) -> "ProjectPaths":
         p = config.paths
         return ProjectPaths(
-            root           = root,
-            dataset_dir    = root / p.dataset,
-            generated_dir  = root / p.generated,
-            mutated_dir    = root / p.mutated,
-            valid_dir      = root / p.valid,
-            invalid_dir    = root / p.invalid,
-            logs_dir       = root / p.logs,
-            results_dir    = root / p.results,
-            evaluation_dir = root / p.evaluation,
-            optimized_dir  = root / p.optimized,
-            diffs_dir      = root / p.diffs,
+            root                = root,
+            dataset_dir         = root / p.dataset,
+            generated_dir       = root / p.generated,
+            mutated_dir         = root / p.mutated,
+            valid_dir           = root / p.valid,
+            invalid_dir         = root / p.invalid,
+            logs_dir            = root / p.logs,
+            results_dir         = root / p.results,
+            evaluation_dir      = root / p.evaluation,
+            optimized_dir       = root / p.optimized,
+            diffs_dir           = root / p.diffs,
+            feedback_seeds_dir  = root / p.feedback_seeds,
         )
 
     def ensure_dirs(self) -> None:

@@ -35,7 +35,8 @@ def main() -> None:
         "invalid":   len(list(paths.invalid_dir.glob("*.ll"))),
     }
 
-    metrics = compute_metrics(paths.results_dir, counts)
+    mutation_log = paths.results_dir / "mutation_log.jsonl"
+    metrics = compute_metrics(paths.results_dir, counts, mutation_log=mutation_log)
     write_metrics(metrics,   paths.evaluation_dir / file_names["metrics_json"])
     write_csv(metrics,       paths.evaluation_dir / file_names["metrics_csv"])
     write_bar_chart(metrics, paths.evaluation_dir / file_names["metrics_png"])

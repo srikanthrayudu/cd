@@ -8,16 +8,17 @@
 # Directory layout (all relative to the project root)
 # ---------------------------------------------------------------------------
 paths:
-  dataset:      dataset
-  generated:    generated_ir
-  mutated:      mutated_ir
-  valid:        valid_ir
-  invalid:      invalid_ir
-  logs:         logs
-  results:      results
-  evaluation:   evaluation
-  optimized:    results/optimized_ir
-  diffs:        results/code_diffs
+  dataset:        dataset
+  generated:      generated_ir
+  mutated:        mutated_ir
+  valid:          valid_ir
+  invalid:        invalid_ir
+  logs:           logs
+  results:        results
+  evaluation:     evaluation
+  optimized:      results/optimized_ir
+  diffs:          results/code_diffs
+  feedback_seeds: feedback_seeds    # diff-producing IR files reused as mutation seeds
 
 # ---------------------------------------------------------------------------
 # IR Generation settings

@@ -517,37 +517,6 @@ def _page_overview(snap: dict[str, Any]) -> None:
                 use_container_width=True,
                 hide_index=True,
             )
-            '<div class="panel-subtitle">Each stage feeds the next; all paths and tool names come from config.yaml.</div>'
-            '<ul style="color:#d9e4f4;margin:.4rem 0 0 1.1rem;">'
-            '<li><b>IR Generation</b> — template-based or LLM-backed (openai)</li>'
-            '<li><b>Mutation</b> — opcode swap, dead code, CFG splits, constant tweaks</li>'
-            '<li><b>Validation</b> — llvm-as + opt verify, or regex fallback</li>'
-            '<li><b>Execution</b> — lli (interpret) + clang -O0 / -O3 (compile + run)</li>'
-            '<li><b>Analysis</b> — binary-size diff, textual IR diff, behavioural diff</li>'
-            '</ul></div>',
-            unsafe_allow_html=True,
-        )
-        png_path = EVAL_DIR / _FILES["metrics_png"]
-        if png_path.exists():
-            st.image(str(png_path), caption="Pipeline snapshot", use_container_width=True)
-        else:
-            st.info("Run the pipeline to generate evaluation/metrics.png.")
-
-    with right:
-        required = [cfg.execution.interpreter, cfg.execution.compiler, cfg.execution.optimizer,
-                    cfg.validation.assembler_tool]
-        missing  = [t for t in required if not _tool_ok(t)]
-        c1, c2 = st.columns(2)
-        c1.metric("Tools present", len(required) - len(missing), f"/{len(required)}")
-        c2.metric("Missing",       len(missing), ", ".join(missing) or "none")
-
-        meta = snap.get("run_metadata", {})
-        if meta:
-            st.markdown('<div class="panel"><div class="panel-title">Last run</div></div>',
-                        unsafe_allow_html=True)
-            for k in ("generated_at", "backend", "model", "mode", "gen_count", "mut_per_file"):
-                if k in meta:
-                    st.write(f"• **{k}**: `{meta[k]}`")
 
 
 # ---------------------------------------------------------------------------
